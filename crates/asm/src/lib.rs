@@ -25,12 +25,17 @@ use operand::Operand;
 pub struct AsmError {
     /// 1-based source line.
     pub line: usize,
+    /// The `%include`d file the line is in (None for the main source).
+    pub file: Option<String>,
     pub message: String,
 }
 
 impl fmt::Display for AsmError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "line {}: {}", self.line, self.message)
+        match &self.file {
+            Some(file) => write!(f, "{file} line {}: {}", self.line, self.message),
+            None => write!(f, "line {}: {}", self.line, self.message),
+        }
     }
 }
 
@@ -38,6 +43,8 @@ impl fmt::Display for AsmError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineInfo {
     pub line: usize,
+    /// The `%include`d file (None for the main source).
+    pub file: Option<String>,
     /// Address (origin-relative `$`) of the first byte.
     pub addr: u32,
     pub len: u32,
@@ -62,9 +69,14 @@ pub fn is_directive_word(word: &str) -> bool {
     is_directive(word) || matches!(word, "byte" | "word" | "dword" | "qword" | "short" | "near" | "far" | "strict")
 }
 
-/// Assemble NASM-syntax source into a flat binary.
+/// Assemble NASM-syntax source into a flat binary. `%include` is not available.
 pub fn assemble(src: &str) -> Result<Output, Vec<AsmError>> {
-    let lines = preproc::preprocess(src)?;
+    assemble_with(src, &|_| None)
+}
+
+/// Assemble, loading `%include`d files with `resolver` (file name -> source).
+pub fn assemble_with(src: &str, resolver: &dyn Fn(&str) -> Option<String>) -> Result<Output, Vec<AsmError>> {
+    let lines = preproc::preprocess(src, resolver)?;
     // Bad lines become empty statements so later errors are reported too.
     let (stmts, mut errors) = parse_all(&lines);
     match Assembler::new(stmts).run() {
@@ -102,6 +114,7 @@ pub(crate) enum Stmt {
 
 pub(crate) struct Parsed {
     line: usize,
+    file: Option<String>,
     label: Option<String>,
     stmt: Stmt,
 }
@@ -130,10 +143,10 @@ fn parse_all(lines: &[preproc::Line]) -> (Vec<Parsed>, Vec<AsmError>) {
     let mut scope = String::new();
     for l in lines {
         match parse_line(&l.text, &mut scope) {
-            Ok((label, stmt)) => out.push(Parsed { line: l.line, label, stmt }),
+            Ok((label, stmt)) => out.push(Parsed { line: l.line, file: l.file.clone(), label, stmt }),
             Err(message) => {
-                errors.push(AsmError { line: l.line, message });
-                out.push(Parsed { line: l.line, label: None, stmt: Stmt::Empty });
+                errors.push(AsmError { line: l.line, file: l.file.clone(), message });
+                out.push(Parsed { line: l.line, file: l.file.clone(), label: None, stmt: Stmt::Empty });
             }
         }
     }
@@ -357,7 +370,7 @@ impl Assembler {
             let here = origin + out.bytes.len() as i64;
             if let Some(l) = &p.label {
                 if last && syms.contains_key(l) {
-                    errors.push(AsmError { line: p.line, message: format!("label '{l}' redefined") });
+                    errors.push(AsmError { line: p.line, file: p.file.clone(), message: format!("label '{l}' redefined") });
                 }
                 syms.insert(l.clone(), here);
             }
@@ -367,21 +380,22 @@ impl Assembler {
                 match r {
                     Ok(v) if v.known => {
                         if last && syms.contains_key(name) {
-                            errors.push(AsmError { line: p.line, message: format!("'{name}' redefined") });
+                            errors.push(AsmError { line: p.line, file: p.file.clone(), message: format!("'{name}' redefined") });
                         }
                         syms.insert(name.clone(), v.v);
                     }
                     Ok(_) if last => errors.push(AsmError {
                         line: p.line,
+                        file: p.file.clone(),
                         message: format!("'{name}' depends on an undefined symbol"),
                     }),
                     Ok(_) => {}
-                    Err(m) => errors.push(AsmError { line: p.line, message: m }),
+                    Err(m) => errors.push(AsmError { line: p.line, file: p.file.clone(), message: m }),
                 }
                 continue;
             }
             let env = PassEnv { cur: &syms, prev, here, base: origin };
-            let mut err = |m: String| errors.push(AsmError { line: p.line, message: m });
+            let mut err = |m: String| errors.push(AsmError { line: p.line, file: p.file.clone(), message: m });
             match &p.stmt {
                 Stmt::Empty | Stmt::Equ(..) => {}
                 Stmt::Org(e) => match expr::eval(e, &env) {
@@ -411,7 +425,7 @@ impl Assembler {
             }
             let len = out.bytes.len() - start;
             if len > 0 {
-                out.lines.push(LineInfo { line: p.line, addr: (here as u32), len: len as u32 });
+                out.lines.push(LineInfo { line: p.line, file: p.file.clone(), addr: (here as u32), len: len as u32 });
             }
         }
         (syms, out, errors)

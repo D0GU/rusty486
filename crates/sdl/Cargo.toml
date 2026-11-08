@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 rusty486-core = { path = "../core" }
 rusty486-asm = { path = "../asm" }
+rusty486-firmware = { path = "../firmware" }
 sdl2 = { version = "0.37", features = ["bundled", "static-link"] }
 font8x8 = "0.3"
 rmcp = { version = "3.9", features = ["server", "macros", "transport-streamable-http-server"] }

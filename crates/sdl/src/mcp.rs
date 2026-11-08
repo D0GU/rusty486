@@ -23,6 +23,7 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use rusty486_core::cpu::{self, flags, Cpu};
 use rusty486_core::devices::disk::DiskImage;
+use rusty486_core::fat::Fs;
 use rusty486_core::machine::Drive;
 use rusty486_core::Bus;
 use serde::Deserialize;
@@ -177,9 +178,11 @@ pub struct DiskInsertArgs {
     pub drive: String,
     /// Path to a raw disk image on the host.
     pub path: String,
-    /// If the file doesn't exist, create a blank image of this many KB
+    /// If the file doesn't exist, create an image of this many KB
     /// (1440 for a 1.44 MB floppy).
     pub create_kb: Option<u32>,
+    /// Format for a newly created image: "fat" (default), "tinydos" (bootable) or "blank".
+    pub format: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -234,6 +237,44 @@ pub struct TypeTextArgs {
 pub struct PressKeyArgs {
     /// Key or combination: "enter", "esc", "f1", "up", "a", "ctrl+c", "alt+x", "shift+tab".
     pub key: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DiskPathArgs {
+    /// Drive letter: A, B, C or D.
+    pub drive: String,
+    /// Path on the FAT disk, e.g. "\\" or "GAMES\\README.TXT" (either slash works).
+    pub path: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DiskReadArgs {
+    /// Drive letter: A, B, C or D.
+    pub drive: String,
+    /// File path on the FAT disk.
+    pub path: String,
+    /// Return a hex dump instead of text (default: text unless the file looks binary).
+    pub hex: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DiskWriteArgs {
+    /// Drive letter: A, B, C or D.
+    pub drive: String,
+    /// Destination path on the FAT disk (8.3 names; directories are created).
+    pub path: String,
+    /// Text content to write. Use host_path instead for binary files.
+    pub content: Option<String>,
+    /// A host file to copy onto the disk.
+    pub host_path: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DosCommandArgs {
+    /// A TinyDOS command line, e.g. "DIR", "TYPE README.TXT", "GAME.EXE".
+    pub command: String,
+    /// Emulated milliseconds to let it run after typing (default 1500).
+    pub wait_ms: Option<u64>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -522,7 +563,15 @@ impl Rusty486Mcp {
                 Ok(d) => d,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => match a.create_kb {
                     Some(kb) => {
-                        let d = vec![0u8; kb as usize * 1024];
+                        let mut d = vec![0u8; kb as usize * 1024];
+                        match a.format.as_deref().unwrap_or("fat") {
+                            "blank" => {}
+                            "tinydos" => rusty486_firmware::format_tinydos(&mut d, "RUSTY486").map_err(|e| e.to_string())?,
+                            _ => {
+                                let g = rusty486_core::fat::Geometry::for_size(d.len(), 1);
+                                rusty486_core::fat::format(&mut d, &[], &g, "RUSTY486");
+                            }
+                        }
                         std::fs::write(&path, &d).map_err(|e| format!("{}: {e}", a.path))?;
                         d
                     }
@@ -745,6 +794,107 @@ impl Rusty486Mcp {
             Ok(json!({ "pressed": a.key }))
         })
         .await
+    }
+
+    #[tool(description = "List a directory on a mounted FAT disk image (read directly from the \
+        image, without involving the guest).")]
+    async fn disk_files(&self, Parameters(a): Parameters<DiskPathArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let drive = parse_drive(&a.drive)?;
+            let path = a.path.unwrap_or_default();
+            let disk = emu.machine.disk(drive).ok_or("no disk in that drive")?;
+            let mut data = disk.data.clone();
+            let fs = Fs::open(&mut data).map_err(|e| e.to_string())?;
+            let entries = fs.list(&path).map_err(|e| e.to_string())?;
+            Ok(json!({
+                "path": path,
+                "free_bytes": fs.free_bytes(),
+                "entries": entries.iter().map(|e| json!({
+                    "name": e.name,
+                    "dir": e.is_dir(),
+                    "size": e.size,
+                    "date": format!("{:04}-{:02}-{:02}", 1980 + (e.date >> 9), (e.date >> 5) & 15, e.date & 31),
+                })).collect::<Vec<_>>(),
+            }))
+        })
+        .await
+    }
+
+    #[tool(description = "Read a file from a mounted FAT disk image (text, or a hex dump for \
+        binary files; up to 64 KB).")]
+    async fn disk_read_file(&self, Parameters(a): Parameters<DiskReadArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let drive = parse_drive(&a.drive)?;
+            let disk = emu.machine.disk(drive).ok_or("no disk in that drive")?;
+            let mut data = disk.data.clone();
+            let fs = Fs::open(&mut data).map_err(|e| e.to_string())?;
+            let bytes = fs.read(&a.path).map_err(|e| e.to_string())?;
+            let shown = &bytes[..bytes.len().min(65536)];
+            let binary = shown.iter().any(|&b| b < 9 || (b > 13 && b < 32 && b != 26));
+            if a.hex.unwrap_or(binary) {
+                Ok(Value::String(hex_dump(0, shown)))
+            } else {
+                Ok(Value::String(String::from_utf8_lossy(shown).into_owned()))
+            }
+        })
+        .await
+    }
+
+    #[tool(description = "Write a file onto a mounted FAT disk image (from text content or a \
+        host file). The guest sees it immediately; the image is saved to its host file on exit \
+        or with disk_save.")]
+    async fn disk_write_file(&self, Parameters(a): Parameters<DiskWriteArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let drive = parse_drive(&a.drive)?;
+            let bytes = match (&a.content, &a.host_path) {
+                (Some(text), None) => text.replace("\r\n", "\n").replace('\n', "\r\n").into_bytes(),
+                (None, Some(p)) => std::fs::read(p).map_err(|e| format!("{p}: {e}"))?,
+                _ => return Err("give exactly one of content or host_path".into()),
+            };
+            let disk = emu.machine.disk_mut(drive).ok_or("no disk in that drive")?;
+            let mut fs = Fs::open(&mut disk.data).map_err(|e| e.to_string())?;
+            fs.write_creating_dirs(&a.path, &bytes).map_err(|e| e.to_string())?;
+            disk.dirty = true;
+            Ok(json!({ "written": a.path, "bytes": bytes.len() }))
+        })
+        .await
+    }
+
+    #[tool(description = "Delete a file or empty directory on a mounted FAT disk image.")]
+    async fn disk_delete(&self, Parameters(a): Parameters<DiskPathArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let drive = parse_drive(&a.drive)?;
+            let path = a.path.ok_or("path is required")?;
+            let disk = emu.machine.disk_mut(drive).ok_or("no disk in that drive")?;
+            let mut fs = Fs::open(&mut disk.data).map_err(|e| e.to_string())?;
+            fs.remove(&path).map_err(|e| e.to_string())?;
+            disk.dirty = true;
+            Ok(json!({ "deleted": path }))
+        })
+        .await
+    }
+
+    #[tool(description = "Type a command line into TinyDOS (followed by Enter), let the \
+        machine run for a while, and return the screen text. The machine must be at a DOS prompt.")]
+    async fn dos_command(&self, Parameters(a): Parameters<DosCommandArgs>) -> Result<CallToolResult, McpError> {
+        let wait_ms = a.wait_ms.unwrap_or(1500).min(60_000);
+        let (tx, rx) = oneshot::channel();
+        let len = a.command.len() as u64;
+        self.with(move |emu| {
+            for c in a.command.chars().chain(std::iter::once('\n')) {
+                if let Some(k) = keymap::key_for_char(c) {
+                    emu.typing.push_back(k);
+                }
+            }
+            emu.resume();
+            // Allow time for typing (about 2 keys per frame) plus the wait.
+            let ms = wait_ms + (len + 1) * 10;
+            let cycles = emu.machine.clock_hz * ms / 1000;
+            emu.waiters.push(Waiter { until_cycle: emu.machine.cpu.cycles + cycles, reply: tx });
+        })
+        .await?;
+        let _ = tokio::time::timeout(Duration::from_secs(90), rx).await;
+        self.try_with(|emu| Ok(Value::String(emu.machine.screen_text()))).await
     }
 
     #[tool(description = "Switch the rusty486 window between the machine display and the editor.")]

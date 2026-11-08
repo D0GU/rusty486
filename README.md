@@ -30,18 +30,36 @@ built-in editor and an MCP server so Claude Code can drive the machine.
   builds, **Ctrl+F9** (or Ctrl+R) builds and runs. It reloads files changed on
   disk by other programs.
 
+**Milestone 4, done:** 8259 PIC, 8254 PIT, RTC/CMOS and the custom
+keyboard/mouse device; BIOS keyboard (INT 09h/16h) and timer (INT 08h/1Ah)
+services.
+
+**Milestone 5, done:** TinyDOS, a small MS-DOS 5 compatible OS written in
+assembly (`dos/`): FAT12/FAT16 with subdirectories, an INT 21h subset (console,
+files, directories, find first/next, memory, EXEC of .COM and MZ .EXE,
+TSRs), an INT 33h mouse driver and COMMAND.COM (DIR, TYPE, COPY, DEL, REN,
+MD, RD, CD, MEM, DATE, TIME, ECHO, PAUSE, batch files, AUTOEXEC.BAT).
+Drive C: is a persistent 32 MB TinyDOS disk in `%USERPROFILE%usty486\hdd.img`.
+
 ## Roadmap
 
 1. ~~Real-mode boot to text~~
 2. ~~MCP server (local HTTP + token) so Claude Code can drive the machine~~
 3. ~~Code editor with a built-in NASM-syntax assembler~~
-4. Protected mode and paging, VBE graphics, mini-DOS, sprite/map/sound editors,
-   OPL2 + Sound Blaster, and a drive manager
+4. ~~Interrupts, timer, RTC, keyboard and mouse~~
+5. ~~TinyDOS~~
+6. Protected mode and paging
+7. VBE graphics
+8. OPL2 + Sound Blaster + PC speaker
+9. Sprite, map, sound and disk editors
+10. A Borland-style IDE and compiler for a Rust subset, running inside TinyDOS
 
 ## Building
 
-Requirements: Rust (MSVC toolchain on Windows), CMake, a C compiler (Visual
-Studio Build Tools) and [NASM](https://nasm.us) on `PATH` (or set `NASM`).
+Requirements: Rust (MSVC toolchain on Windows), CMake and a C compiler
+(Visual Studio Build Tools). The BIOS and TinyDOS are assembled at build time
+by rusty486's own assembler; NASM is only used (if present) by tests that
+compare against it.
 
 ```sh
 cargo run --release -p rusty486-sdl                     # boots the built-in demo floppy
@@ -49,8 +67,8 @@ cargo run --release -p rusty486-sdl -- --fda disk.img   # boot your own image
 ```
 
 Options: `--project DIR`, `--fda/--fdb/--hda/--hdb IMG`, `--mhz N`,
-`--mcp-port N`, `--no-mcp`. Keys: Esc toggles the editor, Ctrl+F9 builds and
-runs, F11 resets, Pause pauses. Disk images the guest writes to are saved when
+`--mcp-port N`, `--no-mcp`. Keys: F12 opens the editor (Esc returns), Ctrl+F9
+builds and runs, F11 resets, Pause pauses; everything else goes to the guest. Disk images the guest writes to are saved when
 you close the window.
 
 ## Projects
@@ -94,6 +112,9 @@ claude mcp add --scope user --transport http rusty486 http://127.0.0.1:8486/mcp 
 | `project_info`, `read_source`, `write_source` | The open project and its source files |
 | `assemble`, `build`, `build_and_run` | Built-in assembler; `build_and_run` is the editor's Ctrl+F9 |
 | `set_view` | Show the machine or the editor (`screenshot` takes `view` too) |
+| `type_text`, `press_key` | Keyboard input for the guest |
+| `dos_command` | Type a TinyDOS command and return the screen |
+| `disk_files`, `disk_read_file`, `disk_write_file`, `disk_delete` | Files on mounted FAT images |
 
 Tool calls run on the UI thread between frames, so Claude and the window
 always see the same machine.
@@ -115,6 +136,8 @@ cargo test -p rusty486-core --release --test singlestep -- --nocapture
 |------|------|
 | `crates/core` | Emulator core: CPU, bus, devices. No host I/O (WASM-ready). |
 | `crates/asm` | NASM-syntax assembler. No host I/O (WASM-ready). |
+| `crates/firmware` | BIOS + TinyDOS, assembled at build time; TinyDOS disk builder. |
+| `dos/` | TinyDOS sources: boot sector, kernel, COMMAND.COM. |
 | `crates/sdl` | Desktop frontend (`rusty486` binary). |
 | `bios/` | BIOS and demo boot sector (NASM). |
 | `scripts/` | Helper scripts. |

@@ -1,14 +1,17 @@
 //! A small NASM-style preprocessor: `%define`, `%undef`, `%macro`/`%endmacro`
-//! (with `%1`..`%9`, `%0` and `%%local` labels) and `%rep`/`%endrep`.
+//! (with `%1`..`%9`, `%0` and `%%local` labels), `%rep`/`%endrep`, and
+//! `%include` through a caller-supplied resolver.
 
 use std::collections::HashMap;
 
 use crate::AsmError;
 
-/// A source line after preprocessing, tagged with its original line number.
+/// A source line after preprocessing, tagged with where it came from.
 #[derive(Clone, Debug)]
 pub struct Line {
     pub line: usize,
+    /// Included file name, or None for the main source.
+    pub file: Option<String>,
     pub text: String,
 }
 
@@ -18,10 +21,20 @@ struct Macro {
     body: Vec<String>,
 }
 
-pub fn preprocess(src: &str) -> Result<Vec<Line>, Vec<AsmError>> {
-    let mut pp = Pre { defines: HashMap::new(), macros: HashMap::new(), out: Vec::new(), errors: Vec::new(), uniq: 0 };
-    let lines: Vec<(usize, String)> =
-        src.lines().enumerate().map(|(i, l)| (i + 1, l.to_string())).collect();
+/// Loads `%include`d files by name.
+pub type Resolver<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+pub fn preprocess(src: &str, resolver: Resolver) -> Result<Vec<Line>, Vec<AsmError>> {
+    let mut pp = Pre {
+        defines: HashMap::new(),
+        macros: HashMap::new(),
+        out: Vec::new(),
+        errors: Vec::new(),
+        uniq: 0,
+        resolver,
+        include_depth: 0,
+    };
+    let lines = to_lines(src, None);
     pp.run(&lines, 0);
     if pp.errors.is_empty() {
         Ok(pp.out)
@@ -30,12 +43,18 @@ pub fn preprocess(src: &str) -> Result<Vec<Line>, Vec<AsmError>> {
     }
 }
 
-struct Pre {
+fn to_lines(src: &str, file: Option<String>) -> Vec<Line> {
+    src.lines().enumerate().map(|(i, l)| Line { line: i + 1, file: file.clone(), text: l.to_string() }).collect()
+}
+
+struct Pre<'r> {
     defines: HashMap<String, String>,
     macros: HashMap<String, Macro>,
     out: Vec<Line>,
     errors: Vec<AsmError>,
     uniq: usize,
+    resolver: Resolver<'r>,
+    include_depth: usize,
 }
 
 /// Split off the first whitespace-delimited word.
@@ -97,31 +116,30 @@ fn split_args(s: &str) -> Vec<String> {
     out
 }
 
-impl Pre {
-    fn err(&mut self, line: usize, msg: impl Into<String>) {
-        self.errors.push(AsmError { line, message: msg.into() });
+impl Pre<'_> {
+    fn err(&mut self, at: &Line, msg: impl Into<String>) {
+        self.errors.push(AsmError { line: at.line, file: at.file.clone(), message: msg.into() });
     }
 
-    fn run(&mut self, lines: &[(usize, String)], depth: usize) {
+    fn run(&mut self, lines: &[Line], depth: usize) {
         if depth > 32 {
-            if let Some((l, _)) = lines.first() {
-                self.err(*l, "macro expansion too deep");
+            if let Some(l) = lines.first() {
+                self.err(l, "macro expansion too deep");
             }
             return;
         }
         let mut i = 0;
         while i < lines.len() {
-            let (ln, raw) = (&lines[i].0, &lines[i].1);
-            let ln = *ln;
+            let cur = lines[i].clone();
             i += 1;
-            let code = strip_comment(raw);
+            let code = strip_comment(&cur.text);
             let (word, rest) = first_word(code);
             let lower = word.to_ascii_lowercase();
             match lower.as_str() {
                 "%define" | "%idefine" | "%xdefine" => {
                     let (name, value) = first_word(rest);
                     if name.is_empty() {
-                        self.err(ln, "%define needs a name");
+                        self.err(&cur, "%define needs a name");
                     } else {
                         let value = self.substitute(value.trim());
                         self.defines.insert(name.to_string(), value);
@@ -129,6 +147,22 @@ impl Pre {
                 }
                 "%undef" => {
                     self.defines.remove(first_word(rest).0);
+                }
+                "%include" => {
+                    let name = rest.trim().trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
+                    if self.include_depth >= 16 {
+                        self.err(&cur, "%include nested too deeply");
+                        continue;
+                    }
+                    match (self.resolver)(name) {
+                        Some(src) => {
+                            let inc = to_lines(&src, Some(name.to_string()));
+                            self.include_depth += 1;
+                            self.run(&inc, depth);
+                            self.include_depth -= 1;
+                        }
+                        None => self.err(&cur, format!("cannot include '{name}'")),
+                    }
                 }
                 "%macro" | "%imacro" => {
                     let (name, params) = first_word(rest);
@@ -142,7 +176,7 @@ impl Pre {
                     let mut body = Vec::new();
                     let mut closed = false;
                     while i < lines.len() {
-                        let l = &lines[i].1;
+                        let l = &lines[i].text;
                         i += 1;
                         if first_word(strip_comment(l)).0.eq_ignore_ascii_case("%endmacro") {
                             closed = true;
@@ -151,7 +185,7 @@ impl Pre {
                         body.push(l.clone());
                     }
                     if !closed {
-                        self.err(ln, "%macro without %endmacro");
+                        self.err(&cur, "%macro without %endmacro");
                     }
                     self.macros.insert(name.to_ascii_lowercase(), Macro { min, max, body });
                 }
@@ -161,7 +195,7 @@ impl Pre {
                     let mut nest = 0;
                     let mut closed = false;
                     while i < lines.len() {
-                        let w = first_word(strip_comment(&lines[i].1)).0.to_ascii_lowercase();
+                        let w = first_word(strip_comment(&lines[i].text)).0.to_ascii_lowercase();
                         if w == "%rep" {
                             nest += 1;
                         } else if w == "%endrep" {
@@ -176,7 +210,7 @@ impl Pre {
                         i += 1;
                     }
                     if !closed {
-                        self.err(ln, "%rep without %endrep");
+                        self.err(&cur, "%rep without %endrep");
                         continue;
                     }
                     match crate::lexer::parse_number(count_src.trim()) {
@@ -185,17 +219,15 @@ impl Pre {
                                 self.run(&body, depth + 1);
                             }
                         }
-                        _ => self.err(ln, "%rep count must be a number"),
+                        _ => self.err(&cur, "%rep count must be a number"),
                     }
                 }
-                "%endmacro" | "%endrep" => self.err(ln, format!("{word} without a matching start")),
-                w if w.starts_with('%') => {
-                    self.err(ln, format!("unsupported preprocessor directive '{word}'"))
-                }
+                "%endmacro" | "%endrep" => self.err(&cur, format!("{word} without a matching start")),
+                w if w.starts_with('%') => self.err(&cur, format!("unsupported preprocessor directive '{word}'")),
                 _ => {
-                    let text = self.substitute(raw);
-                    if !self.expand_macro(ln, &text, depth) {
-                        self.out.push(Line { line: ln, text });
+                    let text = self.substitute(&cur.text);
+                    if !self.expand_macro(&cur, &text, depth) {
+                        self.out.push(Line { text, ..cur });
                     }
                 }
             }
@@ -203,7 +235,7 @@ impl Pre {
     }
 
     /// Expand a macro invocation on this line, if there is one.
-    fn expand_macro(&mut self, ln: usize, text: &str, depth: usize) -> bool {
+    fn expand_macro(&mut self, at: &Line, text: &str, depth: usize) -> bool {
         let code = strip_comment(text);
         let (mut word, mut rest) = first_word(code);
         let mut label = None;
@@ -217,14 +249,15 @@ impl Pre {
         };
         let args = split_args(rest);
         if args.len() < m.min || args.len() > m.max {
-            self.err(ln, format!("macro '{word}' expects {}..{} arguments, got {}", m.min, m.max, args.len()));
+            let msg = format!("macro '{word}' expects {}..{} arguments, got {}", m.min, m.max, args.len());
+            self.err(at, msg);
             return true;
         }
         self.uniq += 1;
         let id = self.uniq;
-        let mut body: Vec<(usize, String)> = Vec::new();
+        let mut body: Vec<Line> = Vec::new();
         if let Some(l) = label {
-            body.push((ln, format!("{l}:")));
+            body.push(Line { text: format!("{l}:"), ..at.clone() });
         }
         for b in &m.body {
             let mut s = b.replace("%%", &format!("..@{id}."));
@@ -232,7 +265,7 @@ impl Pre {
             for (k, a) in args.iter().enumerate().rev() {
                 s = s.replace(&format!("%{}", k + 1), a);
             }
-            body.push((ln, s));
+            body.push(Line { text: s, ..at.clone() });
         }
         self.run(&body, depth + 1);
         true
@@ -306,10 +339,14 @@ impl Pre {
 mod tests {
     use super::*;
 
+    fn none(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn defines_and_macros() {
         let src = "%define PORT 0x300\n%define CMD PORT+1\n%macro SET 2\n mov %1, %2\n%endmacro\n SET dx, CMD ; c\n";
-        let out = preprocess(src).unwrap();
+        let out = preprocess(src, &none).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].line, 6);
         assert!(out[0].text.contains("mov dx, 0x300+1"), "{}", out[0].text);
@@ -317,7 +354,19 @@ mod tests {
 
     #[test]
     fn rep() {
-        let out = preprocess("%rep 3\nnop\n%endrep\n").unwrap();
+        let out = preprocess("%rep 3\nnop\n%endrep\n", &none).unwrap();
         assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn include() {
+        let r = |n: &str| (n == "inc.asm").then(|| "%define X 5\nmov ax, X\n".to_string());
+        let out = preprocess("nop\n%include \"inc.asm\"\nmov bx, X\n", &r).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1].file.as_deref(), Some("inc.asm"));
+        assert_eq!(out[1].line, 2);
+        assert!(out[2].text.contains("mov bx, 5"));
+        let e = preprocess("%include 'missing.asm'\n", &r).unwrap_err();
+        assert!(e[0].message.contains("missing.asm"));
     }
 }

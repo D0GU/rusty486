@@ -7,6 +7,7 @@
 pub mod bus;
 pub mod cpu;
 pub mod devices;
+pub mod fat;
 pub mod machine;
 
 pub use bus::Bus;

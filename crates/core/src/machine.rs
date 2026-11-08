@@ -217,10 +217,19 @@ impl Machine {
 
     pub fn insert_disk(&mut self, drive: Drive, image: DiskImage) {
         self.bus.disk.drives[drive as usize] = Some(image);
+        self.bus.disk.touch();
     }
 
     pub fn eject_disk(&mut self, drive: Drive) -> Option<DiskImage> {
+        self.bus.disk.touch();
         self.bus.disk.drives[drive as usize].take()
+    }
+
+    /// Mutable access to a disk image for host-side edits (marks the media
+    /// as changed so the guest drops its caches).
+    pub fn disk_mut(&mut self, drive: Drive) -> Option<&mut DiskImage> {
+        self.bus.disk.touch();
+        self.bus.disk.drives[drive as usize].as_mut()
     }
 
     pub fn disk(&self, drive: Drive) -> Option<&DiskImage> {

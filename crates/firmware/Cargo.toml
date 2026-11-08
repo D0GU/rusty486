@@ -1,0 +1,16 @@
+[package]
+name = "rusty486-firmware"
+description = "rusty486 BIOS, boot loaders and TinyDOS, assembled at build time, plus the TinyDOS disk builder."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+rusty486-core = { path = "../core" }
+
+[build-dependencies]
+rusty486-asm = { path = "../asm" }
+
+[dev-dependencies]
+rusty486-asm = { path = "../asm" }

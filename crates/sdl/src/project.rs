@@ -1,30 +1,29 @@
-//! rusty486 projects: a folder with `project.toml`, sources under `src/`, and
-//! build output under `build/`.
+//! rusty486 projects: a folder with `project.toml`, sources under `src/`,
+//! data files under `data/`, and build output under `build/`.
 //!
 //! ```text
 //! my-game/
 //!   project.toml      name = "my-game", entry = "src/main.asm"
-//!   src/main.asm
-//!   build/main.bin    assembled program
-//!   build/disk.img    bootable 1.44 MB floppy: loader + program
+//!   src/main.asm      the program (org 0x100, a DOS .COM)
+//!   data/...          files copied onto the program's disk
+//!   build/NAME.COM    assembled program
+//!   build/disk.img    bootable TinyDOS floppy that runs it
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use rusty486_asm::{AsmError, Output};
+use rusty486_core::fat::Fs;
 
-pub const LOADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/loader.bin"));
-/// Where the build patches the program's sector count into the loader.
-const LOADER_SECTORS_OFFSET: usize = 0x1FC;
-const FLOPPY_SIZE: usize = 1_474_560;
-/// Programs load at 1000:0100 and must fit in that 64 KB segment.
+/// .COM programs load at PSP:0100 and must fit in one 64 KB segment.
 pub const MAX_PROGRAM: usize = 0xFF00;
+const HDD_SIZE: usize = 32 * 1024 * 1024;
 
 const TEMPLATE: &str = r#"; rusty486 program
 ;
-; Ctrl+F9 (or Ctrl+R) assembles this file, writes it to a boot floppy and runs it.
-; It is loaded at 1000:0100 like a DOS .COM file: CS = DS = ES = SS.
-; Print text with the BIOS (INT 10h) and log to the host with OUT 0E9h, AL.
+; Ctrl+F9 assembles this file, puts it on a TinyDOS boot floppy with the
+; files from the project's data\ folder, and runs it. It's a DOS .COM
+; program: loaded at offset 100h with CS = DS = ES = SS.
 
         org 0x100
         bits 16
@@ -33,23 +32,18 @@ start:
         mov ax, 0x0003          ; 80x25 colour text mode (clears the screen)
         int 0x10
 
-        mov si, hello
-        call print
+        mov dx, hello           ; print a '$'-terminated string
+        mov ah, 0x09
+        int 0x21
 
-        ret                     ; returns to a halt stub
+        mov ah, 0x00            ; wait for a key
+        int 0x16
 
-; Print the NUL-terminated string at DS:SI.
-print:
-        lodsb
-        test al, al
-        jz .done
-        mov ah, 0x0E            ; teletype output
-        mov bx, 0x0007
-        int 0x10
-        jmp print
-.done:  ret
+        mov ax, 0x4C00          ; exit to DOS with code 0
+        int 0x21
 
-hello   db 'Hello from my rusty486 program!', 13, 10, 0
+hello   db 'Hello from my rusty486 program!', 13, 10
+        db 'Press any key to return to TinyDOS.', 13, 10, '$'
 "#;
 
 pub struct Project {
@@ -73,6 +67,7 @@ impl Project {
         let manifest = dir.join("project.toml");
         if !manifest.exists() {
             std::fs::create_dir_all(dir.join("src"))?;
+            std::fs::create_dir_all(dir.join("data"))?;
             let name = dir.file_name().map_or("untitled".into(), |n| n.to_string_lossy().into_owned());
             std::fs::write(&manifest, format!("name = \"{name}\"\nentry = \"src/main.asm\"\n"))?;
             let main = dir.join("src/main.asm");
@@ -102,6 +97,18 @@ impl Project {
         self.dir.join("build/disk.img")
     }
 
+    /// The program's 8.3 file name on the disk, e.g. "MYGAME.COM".
+    pub fn program_name(&self) -> String {
+        let base: String = self
+            .name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(8)
+            .collect::<String>()
+            .to_ascii_uppercase();
+        format!("{}.COM", if base.is_empty() { "PROGRAM".into() } else { base })
+    }
+
     /// Resolve a project-relative path, refusing to escape the project folder.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf, String> {
         let rel = rel.replace('\\', "/");
@@ -114,62 +121,134 @@ impl Project {
 
     /// Source files under `src/`, relative to the project folder.
     pub fn sources(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(self.dir.join("src")) {
-            for e in rd.flatten() {
-                if e.path().is_file() {
-                    out.push(format!("src/{}", e.file_name().to_string_lossy()));
-                }
-            }
-        }
-        out.sort();
-        out
+        list_files(&self.dir, "src")
     }
 
-    /// Assemble `source` and, on success, write build/main.bin and build/disk.img.
+    /// Resolver for `%include`: paths relative to the entry file's folder.
+    fn include(&self, name: &str) -> Option<String> {
+        let base = self.entry_path().parent().map(Path::to_path_buf).unwrap_or_else(|| self.dir.clone());
+        std::fs::read_to_string(base.join(name)).ok()
+    }
+
+    /// Assemble `source` and, on success, write the program and a bootable
+    /// TinyDOS floppy that runs it.
     pub fn build(&self, source: &str) -> Build {
-        let output = rusty486_asm::assemble(source).and_then(|out| {
+        let resolver = |n: &str| self.include(n);
+        let output = rusty486_asm::assemble_with(source, &resolver).and_then(|out| {
+            let err = |message: String| Err(vec![AsmError { line: 1, file: None, message }]);
             if out.bytes.len() > MAX_PROGRAM {
-                return Err(vec![AsmError {
-                    line: 1,
-                    message: format!("program is {} bytes; the limit is {MAX_PROGRAM}", out.bytes.len()),
-                }]);
+                return err(format!("program is {} bytes; the limit is {MAX_PROGRAM}", out.bytes.len()));
             }
             if out.origin != 0x100 {
-                return Err(vec![AsmError {
-                    line: 1,
-                    message: format!("programs must use 'org 0x100' (found org {:#x})", out.origin),
-                }]);
+                return err(format!("programs must use 'org 0x100' (found org {:#x})", out.origin));
             }
             Ok(out)
         });
-        let disk = output.as_ref().ok().map(|out| make_disk(&out.bytes));
+        let disk = match &output {
+            Ok(out) => match self.make_disk(&out.bytes) {
+                Ok(d) => Some(d),
+                Err(message) => {
+                    return Build { output: Err(vec![AsmError { line: 1, file: None, message }]), disk: None }
+                }
+            },
+            Err(_) => None,
+        };
         if let (Ok(out), Some(disk)) = (&output, &disk) {
             let build = self.dir.join("build");
             let _ = std::fs::create_dir_all(&build);
-            let _ = std::fs::write(build.join("main.bin"), &out.bytes);
+            let _ = std::fs::write(build.join(self.program_name()), &out.bytes);
             let _ = std::fs::write(build.join("disk.img"), disk);
         }
         Build { output, disk }
     }
+
+    fn make_disk(&self, program: &[u8]) -> Result<Vec<u8>, String> {
+        let prog = self.program_name();
+        let autoexec = format!("@ECHO OFF\r\n{}\r\n", prog.trim_end_matches(".COM"));
+        let mut data_files: Vec<(String, Vec<u8>)> = Vec::new();
+        for rel in list_files(&self.dir, "data") {
+            let bytes = std::fs::read(self.dir.join(&rel)).map_err(|e| format!("{rel}: {e}"))?;
+            data_files.push((rel.trim_start_matches("data/").to_string(), bytes));
+        }
+        let mut files: Vec<(&str, &[u8])> = vec![(&prog, program), ("AUTOEXEC.BAT", autoexec.as_bytes())];
+        for (p, d) in &data_files {
+            files.push((p, d));
+        }
+        rusty486_firmware::tinydos_floppy(&self.name, &files).map_err(|e| format!("building the disk: {e}"))
+    }
 }
 
-/// A bootable floppy: the loader in sector 0, the program from sector 1.
-pub fn make_disk(program: &[u8]) -> Vec<u8> {
-    let mut disk = vec![0u8; FLOPPY_SIZE];
-    disk[..512].copy_from_slice(LOADER);
-    let sectors = program.len().div_ceil(512) as u16;
-    disk[LOADER_SECTORS_OFFSET..LOADER_SECTORS_OFFSET + 2].copy_from_slice(&sectors.to_le_bytes());
-    disk[512..512 + program.len()].copy_from_slice(program);
-    disk
+/// Files under `dir/sub`, recursively, as "sub/a/b.txt" paths.
+fn list_files(dir: &Path, sub: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![sub.to_string()];
+    while let Some(rel) = stack.pop() {
+        if let Ok(rd) = std::fs::read_dir(dir.join(&rel)) {
+            for e in rd.flatten() {
+                let child = format!("{rel}/{}", e.file_name().to_string_lossy());
+                if e.path().is_dir() {
+                    stack.push(child);
+                } else {
+                    out.push(child);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
-/// Default project folder: %USERPROFILE%\rusty486\default.
-pub fn default_dir() -> PathBuf {
+fn rusty486_home() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rusty486")
-        .join("default")
+}
+
+/// Default project folder: %USERPROFILE%\rusty486\default.
+pub fn default_dir() -> PathBuf {
+    rusty486_home().join("default")
+}
+
+/// The persistent hard disk image: %USERPROFILE%\rusty486\hdd.img.
+pub fn hdd_path() -> PathBuf {
+    rusty486_home().join("hdd.img")
+}
+
+/// Load the hard disk image, creating a 32 MB TinyDOS disk if it doesn't
+/// exist. TinyDOS disks get the current kernel and COMMAND.COM.
+pub fn open_or_create_hdd(path: &Path) -> std::io::Result<Vec<u8>> {
+    if let Ok(mut data) = std::fs::read(path) {
+        if rusty486_firmware::is_tinydos(&data) {
+            refresh_system(&mut data);
+        }
+        return Ok(data);
+    }
+    let mut data = vec![0u8; HDD_SIZE];
+    rusty486_firmware::format_tinydos(&mut data, "RUSTY486")
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    {
+        let mut fs = Fs::open(&mut data).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let readme = b"Welcome to TinyDOS on rusty486!\r\n\r\nThis is drive C:, saved in hdd.img in your rusty486 folder.\r\nType HELP for a list of commands.\r\n";
+        let _ = fs.write("README.TXT", readme);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, &data)?;
+    Ok(data)
+}
+
+/// Update the kernel (in the reserved sectors) and COMMAND.COM on an
+/// existing TinyDOS disk, if the reserved area is big enough.
+fn refresh_system(data: &mut [u8]) {
+    let reserved = u16::from_le_bytes([data[14], data[15]]) as usize;
+    let kernel = rusty486_firmware::DOS_KERNEL;
+    if (reserved - 1) * 512 >= kernel.len() {
+        data[512..512 + kernel.len()].copy_from_slice(kernel);
+        if let Ok(mut fs) = Fs::open(data) {
+            let _ = fs.write("COMMAND.COM", rusty486_firmware::COMMAND_COM);
+        }
+    }
 }

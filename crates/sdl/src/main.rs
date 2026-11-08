@@ -5,8 +5,9 @@
 //!          [--mcp-port N] [--no-mcp] [IMG]
 //! ```
 //!
-//! With no disks, it boots the built-in milestone 1 demo floppy. Disk images
-//! the guest writes to are saved back to their files on exit.
+//! Drive C: is a persistent TinyDOS hard disk (%USERPROFILE%\rusty486\hdd.img,
+//! created on first run) unless --hda is given. Disk images the guest writes
+//! to are saved back to their files on exit.
 //!
 //! Keys: F12 = machine -> editor (Esc goes back), Ctrl+F9 = build and run the
 //! project, F11 = reset, Pause = pause/resume. Other keys go to the machine.
@@ -36,8 +37,7 @@ use emu::{Emu, Job, View};
 use project::Project;
 use screen::{SCREEN_H, SCREEN_W};
 
-const BIOS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bios.bin"));
-const HELLO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.bin"));
+use rusty486_firmware::BIOS;
 
 const USAGE: &str = "usage: rusty486 [--project DIR] [--fda IMG] [--fdb IMG] [--hda IMG] [--hdb IMG] \
                      [--mhz N] [--mcp-port N] [--no-mcp] [IMG]";
@@ -107,11 +107,13 @@ fn run(args: Args) -> Result<(), String> {
     machine.set_time(chrono::Local::now().naive_local().and_utc().timestamp());
     let mut emu = Emu::new(machine, project, editor);
 
-    if args.disks.is_empty() {
-        let mut floppy = DiskImage::blank_floppy();
-        floppy.data[..512].copy_from_slice(HELLO);
-        floppy.read_only = true;
-        emu.machine.insert_disk(Drive::A, floppy);
+    if !args.disks.iter().any(|(d, _)| *d == Drive::C) {
+        // The persistent TinyDOS hard disk.
+        let path = project::hdd_path();
+        let data = project::open_or_create_hdd(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("C: {}", path.display());
+        emu.insert_disk(Drive::C, path, DiskImage::new(data));
     }
     for (drive, path) in &args.disks {
         let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;

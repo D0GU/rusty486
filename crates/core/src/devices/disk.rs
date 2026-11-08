@@ -16,6 +16,7 @@
 //! | 0x314-0x315 | R   | Cylinders                                                 |
 //! | 0x316       | R   | Heads                                                     |
 //! | 0x317       | R   | Sectors per track                                         |
+//! | 0x318       | R   | Media generation: changes whenever the host swaps or edits a disk |
 
 pub const SECTOR: usize = 512;
 pub const BASE_PORT: u16 = 0x300;
@@ -84,6 +85,9 @@ pub struct DiskController {
     count: u16,
     addr: u32,
     error: u8,
+    /// Bumped when disks are inserted, ejected or modified by the host, so
+    /// the guest OS knows to drop its caches.
+    pub generation: u8,
 }
 
 impl DiskController {
@@ -101,6 +105,11 @@ impl DiskController {
         Self::slot(self.drive).and_then(|i| self.drives[i].as_ref())
     }
 
+    /// Note a host-side change to the disks.
+    pub fn touch(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     pub fn read(&self, port: u16) -> u8 {
         let geo = self.selected();
         let byte = |v: u32, i: u16| (v >> (8 * i)) as u8;
@@ -115,6 +124,7 @@ impl DiskController {
             p @ 0x14..=0x15 => byte(geo.map_or(0, |d| d.cylinders as u32), p - 0x14),
             0x16 => geo.map_or(0, |d| d.heads),
             0x17 => geo.map_or(0, |d| d.sectors),
+            0x18 => self.generation,
             _ => 0xFF,
         }
     }
