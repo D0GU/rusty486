@@ -1,0 +1,25 @@
+[package]
+name = "rustland"
+description = "Rustland R++: a Borland-style IDE for R++ (a Rust subset) that runs inside TinyDOS on rusty486."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+# Built for i586-unknown-linux-gnu with rust-lld (see .cargo/config.toml and
+# scripts/build-rustland.ps1); not part of the host workspace.
+[workspace]
+
+[dependencies]
+rusty486-lang = { path = "../lang" }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+codegen-units = 1
+lto = true
+debug = false
+
+[profile.dev]
+panic = "abort"
+opt-level = 1

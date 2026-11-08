@@ -1,0 +1,10 @@
+[build]
+target = "i586-unknown-linux-gnu"
+
+[target.i586-unknown-linux-gnu]
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=ld.lld",
+    "-C", "target-cpu=i486",
+    "-C", "relocation-model=static",
+]

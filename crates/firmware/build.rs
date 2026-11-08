@@ -31,7 +31,7 @@ fn main() {
     for name in ["bios", "hello", "loader"] {
         assemble(&root.join("bios"), name, &out_dir);
     }
-    for name in ["boot", "kernel", "command", "pmstub"] {
+    for name in ["boot", "kernel", "command"] {
         assemble(&root.join("dos"), name, &out_dir);
     }
     println!("cargo:rerun-if-changed=build.rs");

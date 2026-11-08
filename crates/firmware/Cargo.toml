@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 rusty486-core = { path = "../core" }
+rusty486-lang = { path = "../lang" }
 
 [build-dependencies]
 rusty486-asm = { path = "../asm" }

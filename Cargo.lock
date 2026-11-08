@@ -837,6 +837,16 @@ version = "0.1.0"
 dependencies = [
  "rusty486-asm",
  "rusty486-core",
+ "rusty486-lang",
+]
+
+[[package]]
+name = "rusty486-lang"
+version = "0.1.0"
+dependencies = [
+ "rusty486-asm",
+ "rusty486-core",
+ "rusty486-firmware",
 ]
 
 [[package]]

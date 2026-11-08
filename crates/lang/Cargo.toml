@@ -1,0 +1,16 @@
+[package]
+name = "rusty486-lang"
+description = "R++: a compiler for a Rust subset that produces 32-bit TinyDOS programs. no_std, so it also runs inside rusty486."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+rusty486-asm = { path = "../asm" }
+
+[dev-dependencies]
+rusty486-core = { path = "../core" }
+rusty486-firmware = { path = "../firmware" }

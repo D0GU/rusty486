@@ -68,6 +68,60 @@ with a live keyboard piano, `data\INSTR.BIN`) and **Disks** (drive manager:
 browse and delete files on mounted images, new TinyDOS floppies, insert,
 eject, save). Everything in `data\` is copied onto the program's disk.
 
+**Milestone 10, done:** **Rustland R++**, a Borland C++-style IDE for R++, a
+subset of Rust, that runs inside TinyDOS. Type `RUSTLAND` on drive C: (the
+examples are in `C:\RPP`: `CD RPP`, `RUSTLAND SNAKE`). Ctrl+F9 compiles and
+runs, Alt+F9 compiles, F1 has the language reference. See
+[Rustland R++](#rustland-r) below.
+
+## Rustland R++
+
+![Rustland R++ with the Compile menu open](docs/rustland.png)
+
+The IDE is real Rust (`crates/rustland`, `no_std`) built for
+`i586-unknown-linux-gnu`, linked at 4 MB and packed into `RUSTLAND.EXE` with a
+DOS extender stub (`dos/pmstub.asm`): the stub loads the 32-bit image above
+1 MB, switches to flat protected mode and thunks back to real mode for DOS and
+BIOS calls. The compiler (`crates/lang`, `no_std` + `alloc`) is the same
+crate the host tests use; it emits x86 machine code directly and packs the
+program with the same stub, linked at 8 MB.
+
+- **Editor:** menus (F10/Alt+letter), syntax colours, insert/overwrite,
+  Shift+arrow selection, Ctrl+Ins/Shift+Ins/Shift+Del clipboard, undo
+  (Alt+BkSp), find (Ctrl+F, Ctrl+L), go to line (Ctrl+G), auto-indent, file
+  dialog (F3), save (F2), DOS shell.
+- **Build:** compile errors appear in the Message window and move the cursor
+  to the error (F6 for the next one). Ctrl+F9 runs the program with optional
+  arguments (Run > Arguments); Alt+F5 shows the user screen again.
+
+**R++** supports functions, `let`/`mut`, `i8`-`u32`, `isize`/`usize`, `bool`,
+`char`, `&str`, arrays, slices (`&a[1..3]`), references and raw pointers,
+structs with `impl` blocks and methods, C-like enums, `const`/`static`,
+`if`/`while`/`loop`/`for` (ranges, `.rev()`, `.step_by()`, `&array`,
+`.chars()`), `match` with literals, ranges, `|` and guards, and `print!`,
+`println!`, `panic!`, `assert!`, `assert_eq!` with `{}`, `{:?}`, `{:x}`,
+widths and alignment. Indexing is bounds-checked and panics like Rust.
+Untyped integer literals take their type from how a variable is used.
+A prelude (written in R++) adds `read_line`, `read_key`, `key_pressed`,
+`args`, `parse_int`, `file_read`/`file_write`, `put_pixel` and mode 13h,
+`put_char_at`, `gotoxy`, `sleep_ms`, `beep`, `random_range`, `alloc` and
+`dos_int` for any DOS or BIOS call.
+
+Not supported: generics, traits, closures, tuples, `Option`/`Result`,
+`String`/`Vec`/`Box`, floating point, 64-bit integers, modules, and the borrow
+checker. Programs are therefore "Rust-shaped" rather than full Rust; real rustc
+cannot run on the emulated machine.
+
+To rebuild the IDE after changing `crates/rustland` or `crates/lang`:
+
+```powershell
+rustup target add i586-unknown-linux-gnu
+scripts/build-rustland.ps1        # writes dos/rustland/RUSTLAND.EXE
+```
+
+The emulator copies the current `RUSTLAND.EXE` to `C:\` on every start and the
+examples to `C:\RPP` if they are missing.
+
 ## Roadmap
 
 1. ~~Real-mode boot to text~~
@@ -79,7 +133,7 @@ eject, save). Everything in `data\` is copied onto the program's disk.
 7. ~~VBE graphics~~
 8. ~~OPL2 + Sound Blaster + PC speaker~~
 9. ~~Sprite, map, sound and disk editors~~
-10. A Borland-style IDE and compiler for a Rust subset, running inside TinyDOS
+10. ~~A Borland-style IDE and compiler for a Rust subset, running inside TinyDOS~~
 
 ## Building
 
@@ -152,6 +206,7 @@ always see the same machine.
 cargo test --release                    # unit + boot tests
 scripts/fetch-tests.ps1                 # download the 386 CPU suite (~576 MB)
 cargo test -p rusty486-core --release --test singlestep -- --nocapture
+cargo test -p rusty486-lang --release   # R++ programs and the IDE, run under TinyDOS
 ```
 
 `RUSTY486_TEST_FILTER=0F` limits the CPU suite to matching opcode files, and
@@ -164,6 +219,9 @@ cargo test -p rusty486-core --release --test singlestep -- --nocapture
 | `crates/core` | Emulator core: CPU, bus, devices. No host I/O (WASM-ready). |
 | `crates/asm` | NASM-syntax assembler. No host I/O (WASM-ready). |
 | `crates/firmware` | BIOS + TinyDOS, assembled at build time; TinyDOS disk builder. |
+| `crates/lang` | R++ compiler (`no_std`), PM stub packer, `pmpack` ELF packer. |
+| `crates/rustland` | Rustland R++ IDE (bare-metal i586, built separately). |
+| `dos/rustland/` | Built `RUSTLAND.EXE` and the example programs. |
 | `dos/` | TinyDOS sources: boot sector, kernel, COMMAND.COM. |
 | `crates/sdl` | Desktop frontend (`rusty486` binary). |
 | `bios/` | BIOS and demo boot sector (NASM). |

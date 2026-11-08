@@ -233,6 +233,7 @@ pub fn open_or_create_hdd(path: &Path) -> std::io::Result<Vec<u8>> {
         let readme = b"Welcome to TinyDOS on rusty486!\r\n\r\nThis is drive C:, saved in hdd.img in your rusty486 folder.\r\nType HELP for a list of commands.\r\n";
         let _ = fs.write("README.TXT", readme);
     }
+    install_rustland(&mut data);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -249,6 +250,35 @@ fn refresh_system(data: &mut [u8]) {
         data[512..512 + kernel.len()].copy_from_slice(kernel);
         if let Ok(mut fs) = Fs::open(data) {
             let _ = fs.write("COMMAND.COM", rusty486_firmware::COMMAND_COM);
+        }
+    }
+    install_rustland(data);
+}
+
+/// The Rustland R++ IDE (built by scripts/build-rustland.ps1).
+const RUSTLAND_EXE: &[u8] = include_bytes!("../../../dos/rustland/RUSTLAND.EXE");
+
+/// Example programs, copied to C:\RPP unless already there.
+const RPP_EXAMPLES: &[(&str, &[u8])] = &[
+    ("RPP/HELLO.RS", include_bytes!("../../../dos/rustland/examples/HELLO.RS")),
+    ("RPP/GUESS.RS", include_bytes!("../../../dos/rustland/examples/GUESS.RS")),
+    ("RPP/PRIMES.RS", include_bytes!("../../../dos/rustland/examples/PRIMES.RS")),
+    ("RPP/SHAPES.RS", include_bytes!("../../../dos/rustland/examples/SHAPES.RS")),
+    ("RPP/PLASMA.RS", include_bytes!("../../../dos/rustland/examples/PLASMA.RS")),
+    ("RPP/SNAKE.RS", include_bytes!("../../../dos/rustland/examples/SNAKE.RS")),
+];
+
+/// Put the current RUSTLAND.EXE in C:\ and the examples in C:\RPP.
+fn install_rustland(data: &mut [u8]) {
+    let Ok(mut fs) = Fs::open(data) else { return };
+    if fs.read("RUSTLAND.EXE").ok().as_deref() != Some(RUSTLAND_EXE) {
+        let _ = fs.write("RUSTLAND.EXE", RUSTLAND_EXE);
+    }
+    for (path, bytes) in RPP_EXAMPLES {
+        if !fs.exists(path) {
+            // DOS text files use CR LF.
+            let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n").replace('\n', "\r\n");
+            let _ = fs.write_creating_dirs(path, text.as_bytes());
         }
     }
 }
