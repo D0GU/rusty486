@@ -444,7 +444,7 @@ fn draw() {
         if DIRTY {
             addstr("  *");
         }
-        mvaddstr(24, 67, MSG);
+        mvaddstr(24, 69, MSG);
         // The cursor.
         mv(PY + (li - TOP) as i32, PX + line_x(li, CUR - LSTART[li]) as i32);
         refresh();
@@ -479,6 +479,12 @@ fn delete_at(p: usize) {
         if p + 1 >= LEN {
             return;
         }
+        // Joining two paragraphs keeps the first one's alignment, unless
+        // the first is empty (deleting a blank line changes nothing else).
+        if TEXT[p] == b'\n' && p > 0 && TEXT[p - 1] != b'\n' {
+            let q = para_end(p + 1);
+            STYLE[q] = (STYLE[q] & 0x0F) | (STYLE[p] & 0xF0);
+        }
         for i in p..LEN - 1 {
             TEXT[i] = TEXT[i + 1];
             STYLE[i] = STYLE[i + 1];
@@ -488,10 +494,17 @@ fn delete_at(p: usize) {
     }
 }
 
+// Enter: split the paragraph (both halves keep its alignment). At the
+// end of a paragraph, start a fresh left-aligned one in plain text.
 fn new_paragraph() {
     unsafe {
-        let al = STYLE[para_end(CUR)] & 0xF0;
-        insert(b'\n', al);
+        let q = para_end(CUR);
+        let at_end = CUR == q;
+        insert(b'\n', STYLE[q] & 0xF0);
+        if at_end {
+            STYLE[q + 1] = STYLE[q + 1] & 0x0F;
+            TYPING = 0;
+        }
     }
 }
 
@@ -697,6 +710,7 @@ fn main() {
     set_align(AL_CENTER);
     type_text("R++ Write", S_BOLD);
     new_paragraph();
+    set_align(AL_CENTER);
     type_text("a word processor written live in Rustland R++", S_ITALIC);
     new_paragraph();
     set_align(AL_LEFT);
