@@ -3,7 +3,7 @@
 use rusty486_core::devices::disk::DiskImage;
 use rusty486_core::fat::Fs;
 use rusty486_core::machine::{Drive, Machine};
-use rusty486_firmware::{tinydos_floppy, BIOS};
+use rusty486_firmware::{pm_exe, tinydos_floppy, PmImage, BIOS};
 
 struct Pc {
     m: Machine,
@@ -449,4 +449,89 @@ buf:
 fn autoexec_runs() {
     let pc = Pc::boot(&[("AUTOEXEC.BAT", b"@ECHO OFF\r\nECHO Autoexec says hi\r\n")]);
     pc.expect("Autoexec says hi");
+}
+
+/// Pack a `bits 32` / `org 0x800000` program for the PM stub.
+fn pm_program(src: &str) -> Vec<u8> {
+    let image = asm(src);
+    pm_exe(&PmImage {
+        image: &image,
+        load: 0x80_0000,
+        bss: 0x1000,
+        entry: 0x80_0000,
+        stack_top: 0x90_0000,
+        heap_end: 0,
+    })
+}
+
+#[test]
+fn pm_stub_runs_32bit_programs() {
+    let hello = pm_program(r#"
+        bits 32
+        org 0x800000
+main:   mov ebx, [esp+4]                ; system table
+        mov [systab], ebx
+        mov esi, msg1
+        call print
+        ; Heap is above the image and BSS.
+        mov eax, [ebx+24]
+        cmp eax, end_of_image
+        jb .bad
+        mov dword [eax], 0x12345678
+        mov esi, msg2
+        call print
+        ; Read the command tail (" ARGS" -> 5 bytes).
+        mov eax, [ebx+20]
+        cmp byte [eax], 5
+        jne .bad
+        mov esi, msg3
+        call print
+        mov eax, 3
+        ret
+.bad:   mov esi, msgbad
+        call print
+        mov eax, 1
+        ret
+
+; Print the '$'-terminated string at ESI through DOS AH=09h.
+print:  mov ebx, [systab]
+        mov edi, [ebx+8]                ; transfer buffer
+.c:     lodsb
+        stosb
+        cmp al, '$'
+        jne .c
+        mov dword [regs], 0x0900        ; eax
+        mov dword [regs+12], 0          ; edx
+        mov eax, [ebx+12]
+        mov [regs+28], ax               ; ds
+        push regs
+        push dword 0x21
+        call [ebx]
+        add esp, 8
+        ret
+
+msg1    db 'Hello from 32-bit protected mode!', 13, 10, '$'
+msg2    db 'Heap OK', 13, 10, '$'
+msg3    db 'Args OK', 13, 10, '$'
+msgbad  db 'BAD', 13, 10, '$'
+systab  dd 0
+regs    times 9 dd 0
+end_of_image:
+    "#);
+    let crash = pm_program(r#"
+        bits 32
+        org 0x800000
+        mov eax, 0
+        div eax
+    "#);
+    let mut pc = Pc::boot(&[("HELLO32.EXE", &hello), ("CRASH.EXE", &crash)]);
+    pc.type_line("HELLO32 ARGS");
+    pc.expect("Hello from 32-bit protected mode!");
+    pc.expect("Heap OK");
+    pc.expect("Args OK");
+    pc.type_line("CRASH");
+    pc.expect("CPU exception 00h at EIP 00800005");
+    // Both programs returned to DOS and the prompt still works.
+    pc.type_line("VER");
+    pc.expect("TinyDOS version 1.0");
 }

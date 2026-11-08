@@ -57,6 +57,30 @@ struct Pre<'r> {
     include_depth: usize,
 }
 
+/// Evaluate a constant expression (numbers and operators only).
+fn eval_const(text: &str) -> Option<i64> {
+    struct NoSyms;
+    impl crate::expr::Env for NoSyms {
+        fn symbol(&self, _: &str) -> Option<i64> {
+            None
+        }
+        fn here(&self) -> i64 {
+            0
+        }
+        fn base(&self) -> i64 {
+            0
+        }
+    }
+    let toks = crate::lexer::lex(text).ok()?;
+    let mut p = crate::expr::Parser::new(&toks, "");
+    let e = p.parse().ok()?;
+    if !p.at_end() {
+        return None;
+    }
+    let v = crate::expr::eval(&e, &NoSyms).ok()?;
+    v.known.then_some(v.v)
+}
+
 /// Split off the first whitespace-delimited word.
 fn first_word(s: &str) -> (&str, &str) {
     let s = s.trim_start();
@@ -147,6 +171,16 @@ impl Pre<'_> {
                 }
                 "%undef" => {
                     self.defines.remove(first_word(rest).0);
+                }
+                "%assign" => {
+                    let (name, value) = first_word(rest);
+                    let text = self.substitute(value.trim());
+                    match eval_const(&text) {
+                        Some(v) => {
+                            self.defines.insert(name.to_string(), v.to_string());
+                        }
+                        None => self.err(&cur, format!("%assign: '{text}' is not a constant expression")),
+                    }
                 }
                 "%include" => {
                     let name = rest.trim().trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
@@ -356,6 +390,21 @@ mod tests {
     fn rep() {
         let out = preprocess("%rep 3\nnop\n%endrep\n", &none).unwrap();
         assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn assign_counts_through_rep() {
+        let out = preprocess("%assign n 0
+%rep 3
+db n
+%assign n n+1
+%endrep
+", &none).unwrap();
+        let texts: Vec<_> = out.iter().map(|l| l.text.trim().to_string()).collect();
+        assert_eq!(texts, ["db 0", "db 1", "db 2"]);
+        let e = preprocess("%assign x undefined_label
+", &none).unwrap_err();
+        assert!(e[0].message.contains("%assign"));
     }
 
     #[test]
