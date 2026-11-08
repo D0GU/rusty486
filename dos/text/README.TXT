@@ -9,6 +9,15 @@ For formatted documents and books, use R++ Write (C:\WRITE).
 START
   TEXT               a new, untitled file
   TEXT NOTES.TXT     open NOTES.TXT (or start it, if it doesn't exist)
+  TEXT C:\RPP\HELLO.RS   a full or relative path works too
+
+OPEN AND SAVE AS
+  Both dialogs browse the whole disk. The list shows ..\ (up one folder),
+  the folders (NAME\), the files, then the drives ([A:], [C:]). Arrows
+  pick, Enter goes into a folder or drive, or opens the file. You can also
+  type a name, a relative path (..\NOTES.TXT) or a full path
+  (C:\WRITE\README.TXT), or a filter such as *.BAT. The dialogs start in
+  the folder of the file you are editing.
 
 FILES
   Text keeps a file exactly as it was: CR LF or LF line ends (shown in the

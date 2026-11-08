@@ -878,7 +878,7 @@ fn set_msg(s: &str) {
     }
 }
 
-static mut FNAME: [u8; 64] = [0; 64];
+static mut FNAME: [u8; 128] = [0; 128];
 static mut FNLEN: usize = 0;
 static mut NAMED: bool = false;
 
@@ -886,7 +886,7 @@ fn set_fname(s: &str) {
     unsafe {
         FNLEN = 0;
         for c in s.bytes() {
-            if FNLEN < 64 {
+            if FNLEN < 128 {
                 FNAME[FNLEN] = c.to_ascii_uppercase();
                 FNLEN += 1;
             }
@@ -1010,7 +1010,14 @@ fn draw_menu_bar(sel: i32) {
         attrset(P_MENU);
         sb_clear();
         if NAMED {
-            sb_str(fname());
+            // Long paths keep their end.
+            let f = fname();
+            if f.len() > 44 {
+                sb_str("...");
+                sb_str(str_from_bytes(&f.as_bytes()[f.len() - 41..]));
+            } else {
+                sb_str(f);
+            }
         } else {
             sb_str("Untitled");
         }
@@ -1678,7 +1685,7 @@ fn list_sort() {
     unsafe {
         for i in 1..LN {
             let mut j = i;
-            while j > 0 && str_less(list_item(j), list_item(j - 1)) {
+            while j > 0 && (LPOS[j] < LPOS[j - 1] || (LPOS[j] == LPOS[j - 1] && str_less(list_item(j), list_item(j - 1)))) {
                 let o = LOFF[j];
                 let l = LLN[j];
                 let p = LPOS[j];
@@ -1843,13 +1850,19 @@ fn save() -> bool {
 
 fn save_as() -> bool {
     unsafe {
-        let init = if NAMED { fname() } else { "" };
-        if !input_box("Save As", "~F~ile name", init) || INLEN == 0 {
+        if !file_dialog("Save As", true) {
             return false;
         }
+        // Add .TXT when the file name (after the folder) has no extension.
+        let t = input_text().as_bytes();
+        let mut s = t.len();
+        while s > 0 && t[s - 1] != b'\\' {
+            s -= 1;
+        }
+        let ext = str_from_bytes(&t[s..]).contains(".");
         sb_clear();
         sb_str(input_text());
-        if !input_text().contains(".") {
+        if !ext {
             sb_str(".TXT");
         }
         set_input(sb());
@@ -1859,6 +1872,7 @@ fn save_as() -> bool {
         }
         set_fname(name);
         NAMED = true;
+        browse_folder_of(name);
         save()
     }
 }
@@ -1891,6 +1905,7 @@ fn open_name(n: &str) {
         }
         set_input(sb());
         let name = input_text();
+        browse_folder_of(name);
         match load(name) {
             0 => {
                 set_fname(name);
@@ -1911,8 +1926,175 @@ fn open_name(n: &str) {
     }
 }
 
-fn list_files(pattern: &str) {
-    let x = dos_buffer();
+// ----------------------------------------------------- disk browser
+
+// The folder being browsed: "X:\" or "X:\DIR\SUB\" (always ends in '\').
+static mut BDIR: [u8; 128] = [0; 128];
+static mut BDLEN: usize = 0;
+// A path being built (by full_path and the listing).
+static mut PATHBUF: [u8; 160] = [0; 160];
+static mut PATHLEN: usize = 0;
+static mut RAW: [u8; 240] = [0; 240];
+// Which files the list shows.
+static mut FILTER: [u8; 16] = [0; 16];
+static mut FILTERLEN: usize = 0;
+
+fn bdir() -> &'static str {
+    unsafe { str_from_bytes(&BDIR[..BDLEN]) }
+}
+
+fn path_str() -> &'static str {
+    unsafe { str_from_bytes(&PATHBUF[..PATHLEN]) }
+}
+
+fn filter() -> &'static str {
+    unsafe { str_from_bytes(&FILTER[..FILTERLEN]) }
+}
+
+fn path_char(c: u8) {
+    unsafe {
+        if PATHLEN < 160 {
+            PATHBUF[PATHLEN] = c.to_ascii_uppercase();
+            PATHLEN += 1;
+        }
+    }
+}
+
+fn path_add(s: &str) {
+    for c in s.bytes() {
+        path_char(c);
+    }
+}
+
+// Browse the folder in PATHBUF.
+fn enter_folder() {
+    unsafe {
+        if PATHLEN == 0 || PATHBUF[PATHLEN - 1] != b'\\' {
+            path_char(b'\\');
+        }
+        BDLEN = if PATHLEN > 128 { 128 } else { PATHLEN };
+        copy_bytes(BDIR.as_mut_ptr(), PATHBUF.as_ptr(), BDLEN);
+    }
+}
+
+fn current_drive() -> u32 {
+    let mut r = Regs::new();
+    r.eax = 0x1900;
+    dos_int(0x21, &mut r);
+    r.eax & 0xFF
+}
+
+// Start browsing in the current drive and directory.
+fn browse_cwd() {
+    unsafe {
+        PATHLEN = 0;
+        path_char(b'A' + current_drive() as u8);
+        path_add(":\\");
+        let x = dos_buffer();
+        *x = 0;
+        let mut q = Regs::new();
+        q.eax = 0x4700;
+        q.ds = dos_buffer_seg();
+        dos_int(0x21, &mut q);
+        if !q.carry() {
+            let mut i: usize = if *x == b'\\' { 1 } else { 0 };
+            while i < 64 && *x.add(i) != 0 {
+                path_char(*x.add(i));
+                i += 1;
+            }
+        }
+        enter_folder();
+    }
+}
+
+// TinyDOS marks the drives it found at boot; selecting a missing one
+// leaves the current drive unchanged.
+fn drive_exists(d: u32) -> bool {
+    let cur = current_drive();
+    let mut s = Regs::new();
+    s.eax = 0x0E00;
+    s.edx = d;
+    dos_int(0x21, &mut s);
+    let ok = current_drive() == d;
+    let mut b = Regs::new();
+    b.eax = 0x0E00;
+    b.edx = cur;
+    dos_int(0x21, &mut b);
+    ok
+}
+
+// Turn a name typed or picked in the browser into a full, tidy path in
+// PATHBUF: relative names start in BDIR; "." and ".." are resolved.
+// Returns true if the name can only be a folder (ends in \ or :, or is ..).
+fn full_path(name: &str) -> bool {
+    unsafe {
+        let b = name.as_bytes();
+        let mut n: usize = 0;
+        let mut drive = BDIR[0];
+        let mut s: usize = 0;
+        let mut root = false;
+        if b.len() >= 2 && b[1] == b':' {
+            drive = b[0];
+            s = 2;
+            root = true;
+        }
+        if s < b.len() && b[s] == b'\\' {
+            root = true;
+        }
+        if !root {
+            for i in 3..BDLEN {
+                RAW[n] = BDIR[i];
+                n += 1;
+            }
+        }
+        for i in s..b.len() {
+            if n < 240 {
+                RAW[n] = b[i];
+                n += 1;
+            }
+        }
+        let last = if b.len() > 0 { b[b.len() - 1] } else { b'\\' };
+        let folder = last == b'\\' || last == b':' || name == "." || name == ".." || name.ends_with("\\..");
+        PATHLEN = 0;
+        path_char(drive);
+        path_add(":\\");
+        let mut i: usize = 0;
+        while i < n {
+            while i < n && RAW[i] == b'\\' {
+                i += 1;
+            }
+            let st = i;
+            while i < n && RAW[i] != b'\\' {
+                i += 1;
+            }
+            let len = i - st;
+            if len == 0 || (len == 1 && RAW[st] == b'.') {
+                continue;
+            }
+            if len == 2 && RAW[st] == b'.' && RAW[st + 1] == b'.' {
+                // Up one folder.
+                if PATHLEN > 3 {
+                    PATHLEN -= 1;
+                    while PATHLEN > 3 && PATHBUF[PATHLEN - 1] != b'\\' {
+                        PATHLEN -= 1;
+                    }
+                }
+                continue;
+            }
+            for k in st..i {
+                path_char(RAW[k]);
+            }
+            path_char(b'\\');
+        }
+        if !folder && PATHLEN > 3 {
+            PATHLEN -= 1;
+        }
+        folder
+    }
+}
+
+// Find-first into the DTA at dos_buffer() + 256; returns the DOS error (0 = found).
+fn find_first(pattern: &str, attr: u32) -> u32 {
     let mut r = Regs::new();
     r.eax = 0x1A00;
     r.edx = 256;
@@ -1921,116 +2103,281 @@ fn list_files(pattern: &str) {
     put_name(0, pattern);
     let mut q = Regs::new();
     q.eax = 0x4E00;
+    q.ecx = attr;
     q.ds = dos_buffer_seg();
-    loop {
-        dos_int(0x21, &mut q);
-        if q.carry() {
-            break;
+    dos_int(0x21, &mut q);
+    if q.carry() { q.eax & 0xFFFF } else { 0 }
+}
+
+fn find_more() -> bool {
+    let mut q = Regs::new();
+    q.eax = 0x4F00;
+    q.ds = dos_buffer_seg();
+    dos_int(0x21, &mut q);
+    !q.carry()
+}
+
+fn found_attr() -> u8 {
+    unsafe { *dos_buffer().add(256 + 21) }
+}
+
+// The found name into the string builder.
+fn found_name() {
+    let x = dos_buffer();
+    sb_clear();
+    let mut i: usize = 0;
+    unsafe {
+        while i < 13 && *x.add(256 + 30 + i) != 0 {
+            sb_char(*x.add(256 + 30 + i));
+            i += 1;
         }
-        sb_clear();
-        let mut i: usize = 0;
-        unsafe {
-            while i < 13 && *x.add(256 + 30 + i) != 0 {
-                sb_char(*x.add(256 + 30 + i));
-                i += 1;
-            }
-        }
-        list_add(0);
-        q = Regs::new();
-        q.eax = 0x4F00;
-        q.ds = dos_buffer_seg();
     }
 }
 
-// Open dialog: a name field over the files in the current directory.
-fn file_dialog() -> bool {
-    list_clear();
-    list_files("*.*");
-    list_sort();
-    set_input("*.*");
-    let mut sel: usize = 0;
-    let mut top: usize = 0;
-    loop {
-        draw();
-        dialog_box(3, 14, 18, 52, "Open");
-        mv(5, 17);
-        addhot("File ~n~ame", P_DLG, P_DLG_HOT);
-        attrset(P_INPUT);
-        mv(6, 17);
-        hline(b' ', 30);
-        mvaddstr(6, 18, input_text());
-        attrset(P_DLG);
-        mv(8, 17);
-        addhot("~F~iles", P_DLG, P_DLG_HOT);
-        attrset(P_LIST);
-        fill(9, 17, 10, 30, b' ');
-        unsafe {
+fn is_dir(path: &str) -> bool {
+    find_first(path, 0x10) == 0 && found_attr() & 0x10 != 0
+}
+
+// List kinds (kept in the list's position field, and sorted by it).
+const L_UP: u32 = 0;
+const L_DIR: u32 = 1;
+const L_FILE: u32 = 2;
+const L_DRIVE: u32 = 3;
+
+// The browsed folder: "..", its folders, the files matching the filter,
+// then the drives.
+fn browse_list() {
+    unsafe {
+        list_clear();
+        if BDLEN > 3 {
+            sb_clear();
+            sb_str("..\\");
+            list_add(L_UP);
+        }
+        PATHLEN = 0;
+        path_add(bdir());
+        path_add("*.*");
+        if find_first(path_str(), 0x10) == 0 {
+            loop {
+                let a = found_attr();
+                found_name();
+                if a & 0x10 != 0 && SB[0] != b'.' {
+                    sb_char(b'\\');
+                    list_add(L_DIR);
+                }
+                if !find_more() {
+                    break;
+                }
+            }
+        }
+        PATHLEN = 0;
+        path_add(bdir());
+        path_add(filter());
+        if find_first(path_str(), 0) == 0 {
+            loop {
+                if found_attr() & 0x18 == 0 {
+                    found_name();
+                    list_add(L_FILE);
+                }
+                if !find_more() {
+                    break;
+                }
+            }
+        }
+        for d in 0..4 {
+            if drive_exists(d) {
+                sb_clear();
+                sb_char(b'[');
+                sb_char(b'A' + d as u8);
+                sb_str(":]");
+                list_add(L_DRIVE);
+            }
+        }
+        list_sort();
+    }
+}
+
+// Browse the folder a file is in (when its path has one).
+fn browse_folder_of(name: &str) {
+    unsafe {
+        let b = name.as_bytes();
+        let mut s = b.len();
+        while s > 0 && b[s - 1] != b'\\' {
+            s -= 1;
+        }
+        if s >= 3 && b[1] == b':' {
+            PATHLEN = 0;
+            path_add(str_from_bytes(&b[..s]));
+            enter_folder();
+        }
+    }
+}
+
+fn has_wild(s: &str) -> bool {
+    s.contains("*") || s.contains("?")
+}
+
+// Open and Save As: a name field over the folder, its subfolders and the
+// drives. Enter on a folder or drive goes into it; a name with * or ?
+// filters the files; a path can be typed. Leaves the full path in INBUF.
+fn file_dialog(title: &str, saving: bool) -> bool {
+    unsafe {
+        if BDLEN == 0 {
+            browse_cwd();
+        }
+        if FILTERLEN == 0 {
+            FILTERLEN = 3;
+            FILTER[0] = b'*';
+            FILTER[1] = b'.';
+            FILTER[2] = b'*';
+        }
+        browse_list();
+        if saving && NAMED {
+            // The current name, without its folder.
+            let f = fname();
+            let b = f.as_bytes();
+            let mut s = b.len();
+            while s > 0 && b[s - 1] != b'\\' && b[s - 1] != b':' {
+                s -= 1;
+            }
+            set_input(str_from_bytes(&b[s..]));
+        } else {
+            set_input(filter());
+        }
+        let mut sel: usize = 0;
+        let mut top: usize = 0;
+        // After picking from the list (or with Save As's current name),
+        // typing starts a new name.
+        let mut picked = saving && NAMED;
+        loop {
+            draw();
+            dialog_box(2, 12, 21, 56, title);
+            mv(4, 15);
+            addhot("File ~n~ame", P_DLG, P_DLG_HOT);
+            attrset(P_INPUT);
+            mv(5, 15);
+            hline(b' ', 36);
+            // Long input scrolls: show its end.
+            let it = input_text();
+            let skip = if it.len() > 34 { it.len() - 34 } else { 0 };
+            mvaddstr(5, 16, str_from_bytes(&it.as_bytes()[skip..]));
+            attrset(P_DLG);
+            let d = bdir();
+            let dskip = if d.len() > 36 { d.len() - 36 } else { 0 };
+            mvaddstr(7, 15, str_from_bytes(&d.as_bytes()[dskip..]));
+            mv(8, 15);
+            addhot("~F~iles and folders", P_DLG, P_DLG_HOT);
+            attrset(P_LIST);
+            fill(9, 15, 12, 36, b' ');
             if sel < top {
                 top = sel;
             }
-            if sel >= top + 10 {
-                top = sel - 9;
+            if sel >= top + 12 {
+                top = sel - 11;
             }
-            for r in 0..10 {
+            for r in 0..12 {
                 let i = top + r;
                 if i >= LN {
                     break;
                 }
                 attrset(if i == sel { P_LIST_SEL } else { P_LIST });
-                mv(9 + r as i32, 17);
-                hline(b' ', 30);
-                mvaddstr(9 + r as i32, 18, list_item(i));
+                mv(9 + r as i32, 15);
+                hline(b' ', 36);
+                mvaddstr(9 + r as i32, 16, list_item(i));
             }
-        }
-        button(6, 50, "  ~O~K  ", true);
-        button(9, 50, " Cancel ", false);
-        curs_set(true);
-        unsafe { mv(6, 18 + INLEN as i32); }
-        refresh();
-        let k = getch();
-        unsafe {
+            if LN == 0 {
+                mvaddstr(9, 16, "(empty)");
+            }
+            button(5, 54, if saving { " ~S~ave  " } else { "  ~O~K  " }, true);
+            button(8, 54, " Cancel ", false);
+            attrset(P_DLG);
+            mvaddstr(21, 15, "Enter: open a folder or file   Esc: cancel");
+            curs_set(true);
+            mv(5, 16 + (it.len() - skip) as i32);
+            refresh();
+            let k = getch();
+            let last = if LN > 0 { LN - 1 } else { 0 };
             match k {
                 KEY_ESC => return false,
                 KEY_ENTER => {
-                    if input_text().contains("*") {
-                        if LN > 0 {
-                            set_input(list_item(sel));
-                            return true;
+                    let mut name = input_text();
+                    if has_wild(name) {
+                        if name != filter() {
+                            // A new filter.
+                            FILTERLEN = if INLEN > 16 { 16 } else { INLEN };
+                            copy_bytes(FILTER.as_mut_ptr(), INBUF.as_ptr(), FILTERLEN);
+                            for j in 0..FILTERLEN {
+                                FILTER[j] = FILTER[j].to_ascii_uppercase();
+                            }
+                            browse_list();
+                            sel = 0;
+                            continue;
                         }
-                    } else if INLEN > 0 {
-                        return true;
+                        if LN == 0 {
+                            continue;
+                        }
+                        name = list_item(sel);
                     }
+                    if INLEN == 0 && !has_wild(name) {
+                        continue;
+                    }
+                    // A drive from the list: "[C:]".
+                    if name.len() == 4 && name.as_bytes()[0] == b'[' {
+                        PATHLEN = 0;
+                        path_char(name.as_bytes()[1]);
+                        path_add(":\\");
+                        enter_folder();
+                        browse_list();
+                        set_input(filter());
+                        sel = 0;
+                        continue;
+                    }
+                    let folder = full_path(name);
+                    if folder || is_dir(path_str()) {
+                        enter_folder();
+                        browse_list();
+                        set_input(filter());
+                        sel = 0;
+                        continue;
+                    }
+                    set_input(path_str());
+                    return true;
                 }
                 KEY_UP => {
                     if sel > 0 {
                         sel -= 1;
                     }
-                    if LN > 0 {
-                        set_input(list_item(sel));
-                    }
                 }
                 KEY_DOWN => {
-                    if sel + 1 < LN {
+                    if sel < last {
                         sel += 1;
                     }
-                    if LN > 0 {
-                        set_input(list_item(sel));
-                    }
                 }
+                KEY_PGUP => sel = if sel > 12 { sel - 12 } else { 0 },
+                KEY_PGDN => sel = if sel + 12 < last { sel + 12 } else { last },
+                KEY_HOME => sel = 0,
+                KEY_END => sel = last,
                 KEY_BKSP => {
+                    picked = false;
                     if INLEN > 0 {
                         INLEN -= 1;
                     }
                 }
                 _ => {
-                    if k > 32 && k < 127 && INLEN < 28 {
-                        if input_text().contains("*") {
+                    if k > 32 && k < 127 && INLEN < 78 {
+                        if picked || (has_wild(input_text()) && input_text() == filter()) {
                             INLEN = 0;
+                            picked = false;
                         }
                         INBUF[INLEN] = (k as u8).to_ascii_uppercase();
                         INLEN += 1;
                     }
                 }
+            }
+            // Moving in the list shows the item in the name field.
+            if (k == KEY_UP || k == KEY_DOWN || k == KEY_PGUP || k == KEY_PGDN || k == KEY_HOME || k == KEY_END) && LN > 0 {
+                set_input(list_item(sel));
+                picked = true;
             }
         }
     }
@@ -2278,7 +2625,7 @@ fn command(c: u32) -> bool {
                 }
             }
             2 => {
-                if confirm_discard() && file_dialog() {
+                if confirm_discard() && file_dialog("Open", false) {
                     open_name(input_text());
                 }
             }
@@ -2519,9 +2866,12 @@ fn main() {
     colors();
     load_options();
     reset_doc();
+    // Names on the command line may be relative or full paths.
+    browse_cwd();
     let a = args();
     if a.len() > 0 {
-        open_name(a);
+        full_path(a);
+        open_name(path_str());
     }
     loop {
         draw();

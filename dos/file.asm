@@ -162,10 +162,12 @@ descend:
         test ax, ax
         jz .same                        ; ".." at the root stays there
 .lookup:
+        push si                         ; the rest of the path
         mov si, comp83
         mov dl, A_DIR | A_HIDDEN | A_SYSTEM
         xor cx, cx
         call find_entry
+        pop si
         jc .nopath
         test byte [bx+DE_ATTR], A_DIR
         jz .nopath

@@ -647,3 +647,20 @@ fn command_line_history_and_completion() {
     pc.type_line("NOSUCH.TXT");
     pc.expect("Bad command or file name");
 }
+
+#[test]
+fn opens_files_by_path_through_folders() {
+    let mut pc = Pc::boot(&[]);
+    {
+        let disk = pc.m.disk_mut(Drive::A).unwrap();
+        let mut fs = Fs::open(&mut disk.data).unwrap();
+        fs.write_creating_dirs("DOCS/OLD/NOTE.TXT", b"three levels down").unwrap();
+    }
+    pc.type_line(r"TYPE DOCS\OLD\NOTE.TXT");
+    pc.expect("three levels down");
+    pc.type_line("CLS");
+    pc.type_line(r"TYPE A:\DOCS\OLD\..\OLD\NOTE.TXT");
+    pc.expect("three levels down");
+    pc.type_line(r"CD DOCS\OLD");
+    pc.expect(r"A:\DOCS\OLD>");
+}

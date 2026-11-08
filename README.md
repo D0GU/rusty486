@@ -159,7 +159,10 @@ for plain text files, in MS-DOS EDIT colours: `TEXT README.TXT`.
 
 - Keeps files exactly as they were: CR LF or LF line ends, tabs, and a
   missing final newline. Files up to 2 MB.
-- File (New, Open with a file list, Save, Save As), Edit (undo, cut, copy,
+- Open and Save As browse the whole disk: folders, `..`, drives, filters
+  (`*.BAT`) and typed full or relative paths; `TEXT C:\RPP\HELLO.RS` works
+  from the command line too.
+- File (New, Open, Save, Save As), Edit (undo, cut, copy,
   paste, select all, time/date on F5), Search (find, find next, replace
   all, go to line) and View (word wrap, line numbers, status bar, tab
   width; saved in `TEXT.CFG`) menus.

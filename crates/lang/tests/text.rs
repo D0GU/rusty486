@@ -183,3 +183,71 @@ fn new_file_crlf_wrap_and_menus() {
     // The view settings are saved.
     assert_eq!(pc.file("TEXT.CFG"), [b'T', 1, 1, 1, 8]);
 }
+
+#[test]
+fn browses_folders_and_opens_paths() {
+    let exe = rusty486_lang::compile(&source()).unwrap();
+    let mut disk = tinydos_floppy("T", &[("TEXT.EXE", &exe)]).unwrap();
+    {
+        let mut fs = Fs::open(&mut disk).unwrap();
+        fs.write_creating_dirs("DOCS/NOTE.TXT", b"a note in a folder\r\n").unwrap();
+        fs.write_creating_dirs("DOCS/OLD/DEEP.TXT", b"deep down\r\n").unwrap();
+    }
+    let mut m = Machine::new(BIOS.to_vec());
+    m.insert_disk(Drive::A, DiskImage::new(disk));
+    let mut pc = Pc { m };
+    pc.run(1500);
+
+    // A relative path on the command line.
+    pc.typ(r"TEXT DOCS\OLD\..\NOTE.TXT");
+    pc.typ("\n");
+    pc.run(1500);
+    pc.expect(r"A:\DOCS\NOTE.TXT");
+    pc.expect("a note in a folder");
+
+    // Open starts in the file's folder: "..", folders, files, drives.
+    pc.ctrl('O', 0x18);
+    pc.expect(r"A:\DOCS\");
+    let full = pc.screen();
+    let s = &full[full.find("Files and folders").unwrap()..];
+    let at = |t: &str| s.find(t).unwrap_or_else(|| panic!("{t} missing:\n{s}"));
+    assert!(at(r"..\") < at(r"OLD\") && at(r"OLD\") < at("NOTE.TXT") && at("NOTE.TXT") < at("[A:]"), "{s}");
+    // Down to OLD\, Enter goes into it; Down past "..", Enter opens DEEP.TXT.
+    pc.key(0x50, 0, 0);
+    pc.key(0x1C, 13, 0);
+    pc.expect(r"A:\DOCS\OLD\");
+    pc.key(0x50, 0, 0);
+    pc.expect("DEEP.TXT");
+    pc.key(0x1C, 13, 0);
+    pc.expect("deep down");
+    pc.expect(r"A:\DOCS\OLD\DEEP.TXT");
+
+    // Up twice with "..", to the root.
+    pc.ctrl('O', 0x18);
+    pc.key(0x1C, 13, 0);
+    pc.expect(r"A:\DOCS\");
+    pc.key(0x1C, 13, 0);
+    let full = pc.screen();
+    let s = &full[full.find("Files and folders").unwrap()..];
+    assert!(s.find(r"DOCS\").unwrap() < s.find("COMMAND.COM").unwrap(), "{s}");
+    // A filter, then a typed path.
+    pc.typ("*.EXE\n");
+    let s = pc.screen();
+    assert!(!s.contains("COMMAND.COM") && s.contains("TEXT.EXE"), "{s}");
+    pc.typ(r"\DOCS\OLD\NEW.TXT");
+    pc.typ("\n");
+    pc.expect("New file");
+    pc.expect(r"A:\DOCS\OLD\NEW.TXT");
+
+    // Save As: the name is selected, so typing replaces it; a relative
+    // path goes from the browsed folder (A:\DOCS\OLD\).
+    pc.typ("saved");
+    pc.key(0x21, 0, ALT);
+    pc.typ("a");
+    pc.expect("Save As");
+    pc.expect("NEW.TXT");
+    pc.typ(r"..\COPY");
+    pc.typ("\n");
+    pc.expect(r"A:\DOCS\COPY.TXT");
+    assert_eq!(pc.file("DOCS/COPY.TXT"), b"saved\r\n");
+}
