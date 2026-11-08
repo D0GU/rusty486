@@ -1,6 +1,6 @@
 ﻿# Builds the Rustland R++ IDE (crates/rustland) for the 486 and packs it into
-# dos/rustland/RUSTLAND.EXE, compiles R++ Write into dos/write/WRITE.EXE and Text into
-# dos/text/TEXT.EXE. The emulator installs them on drive C:.
+# dos/rustland/RUSTLAND.EXE, compiles R++ Write into dos/write/WRITE.EXE and Text and Ant
+# Colony into dos/text and dos/ants. The emulator installs them on drive C:.
 #
 # Needs the i586 target: rustup target add i586-unknown-linux-gnu
 $ErrorActionPreference = "Continue"  # cargo writes progress to stderr
@@ -29,6 +29,9 @@ try {
     # Text, the plain text editor in C:\TEXT.
     & $cargo run --quiet --release -p rusty486-lang --bin rppc -- dos/rustland/examples/TEXT.RS dos/text/TEXT.EXE
     if ($LASTEXITCODE -ne 0) { throw "compiling TEXT.RS failed" }
+    # Ant Colony, the game in C:\ANTS.
+    & $cargo run --quiet --release -p rusty486-lang --bin rppc -- dos/rustland/examples/ANTS.RS dos/ants/ANTS.EXE
+    if ($LASTEXITCODE -ne 0) { throw "compiling ANTS.RS failed" }
 } finally {
     Pop-Location
 }

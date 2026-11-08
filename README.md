@@ -169,12 +169,26 @@ for plain text files, in MS-DOS EDIT colours: `TEXT README.TXT`.
 - Shift selection, word movement, insert/overwrite, a status bar with line,
   column and line-end type.
 
-To rebuild the IDE, R++ Write and Text after changing `crates/rustland`,
-`crates/lang`, `WRITE.RS` or `TEXT.RS`:
+### Ant Colony
+
+**Ant Colony 1.0** (`C:\ANTS`, source `C:\RPP\ANTS.RS`) is a colony simulator
+in 640x480 with 256 colours (VBE mode 101h through the linear framebuffer),
+played with the mouse.
+
+- Workers forage and lay scent trails from food to the nest that other
+  workers follow; trails fade, so the colony's roads shift as food runs out.
+- The queen breeds workers and soldiers from stored food; ants eat, age and
+  starve; spiders hunt from the edges and soldiers fight them.
+- Mouse tools: drop food, build rock walls, dig ponds, erase, release a
+  spider; buttons for breeding, auto-breed, pause, speed (1x/2x/4x), new
+  world.
+
+To rebuild the IDE, R++ Write, Text and Ant Colony after changing
+`crates/rustland`, `crates/lang` or their sources:
 
 ```powershell
 rustup target add i586-unknown-linux-gnu
-scripts/build-rustland.ps1        # writes RUSTLAND.EXE, WRITE.EXE and TEXT.EXE
+scripts/build-rustland.ps1        # writes RUSTLAND.EXE, WRITE.EXE, TEXT.EXE and ANTS.EXE
 ```
 
 The emulator copies the current `RUSTLAND.EXE` to `C:\` on every start and the
@@ -305,6 +319,7 @@ cargo test -p rusty486-lang --release   # R++ programs and the IDE, run under Ti
 | `dos/rustland/` | Built `RUSTLAND.EXE` and the example programs. |
 | `dos/write/` | R++ Write: built `WRITE.EXE`, README and a sample book (installed as `C:\WRITE`). |
 | `dos/text/` | Text: built `TEXT.EXE` and README (installed as `C:\TEXT`). |
+| `dos/ants/` | Ant Colony: built `ANTS.EXE` and README (installed as `C:\ANTS`). |
 | `dos/` | TinyDOS sources: boot sector, kernel, COMMAND.COM. |
 | `crates/sdl` | Desktop frontend (`rusty486` binary). |
 | `bios/` | BIOS and demo boot sector (NASM). |

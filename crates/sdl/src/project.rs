@@ -268,6 +268,7 @@ const RPP_EXAMPLES: &[(&str, &[u8])] = &[
     ("RPP/SNAKE.RS", include_bytes!("../../../dos/rustland/examples/SNAKE.RS")),
     ("RPP/WRITE.RS", include_bytes!("../../../dos/rustland/examples/WRITE.RS")),
     ("RPP/TEXT.RS", include_bytes!("../../../dos/rustland/examples/TEXT.RS")),
+    ("RPP/ANTS.RS", include_bytes!("../../../dos/rustland/examples/ANTS.RS")),
 ];
 
 /// R++ Write, installed in its own folder, C:\WRITE.
@@ -278,6 +279,9 @@ const WRITE_FILES: &[(&str, &[u8], bool)] = &[
     // Text, the plain text editor, in C:\TEXT.
     ("TEXT/TEXT.EXE", include_bytes!("../../../dos/text/TEXT.EXE"), true),
     ("TEXT/README.TXT", include_bytes!("../../../dos/text/README.TXT"), true),
+    // Ant Colony, a game.
+    ("ANTS/ANTS.EXE", include_bytes!("../../../dos/ants/ANTS.EXE"), true),
+    ("ANTS/README.TXT", include_bytes!("../../../dos/ants/README.TXT"), true),
 ];
 
 /// Put the current RUSTLAND.EXE in C:\, the examples in C:\RPP and R++
