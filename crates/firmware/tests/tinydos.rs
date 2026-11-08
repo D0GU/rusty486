@@ -59,6 +59,7 @@ fn asm(src: &str) -> Vec<u8> {
 #[test]
 fn boots_to_prompt() {
     let pc = Pc::boot(&[]);
+    pc.expect("131072 KB RAM OK");
     pc.expect("TinyDOS 1.0");
     pc.expect("A:\\>");
 }
@@ -480,6 +481,10 @@ main:   mov ebx, [esp+4]                ; system table
         mov dword [eax], 0x12345678
         mov esi, msg2
         call print
+        ; The heap reaches the top of the 128 MB of RAM.
+        mov ebx, [systab]
+        cmp dword [ebx+28], 0x8000000
+        jne .bad
         ; Read the command tail (" ARGS" -> 5 bytes).
         mov eax, [ebx+20]
         cmp byte [eax], 5
@@ -632,4 +637,13 @@ fn command_line_history_and_completion() {
     let s = pc.screen();
     assert!(s.contains("[GAMES]") && s.contains("README.TXT") && s.contains("RECIPE.TXT") && s.contains("file(s)"), "{s}");
     assert!(s.lines().any(|l| l.contains("README.TXT") && l.contains("RECIPE.TXT")), "{s}");
+
+    // Typing a text file's name doesn't run it (it used to hang).
+    pc.type_line("CLS");
+    pc.type_line("readme.txt");
+    pc.expect("Not a program: README.TXT. To view it, type: TYPE README.TXT");
+    pc.type_line("VER");
+    pc.expect("TinyDOS version 1.0");
+    pc.type_line("NOSUCH.TXT");
+    pc.expect("Bad command or file name");
 }

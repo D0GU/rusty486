@@ -180,6 +180,24 @@ run_external:
         mov si, cmdname
         call has_dot
         jc .tryexts                     ; no extension given: try .COM/.EXE/.BAT
+        ; Only programs run: anything else (README.TXT) would be executed as
+        ; machine code and hang the machine.
+        mov si, cmdname
+        call is_program
+        jnc .program
+        mov si, cmdname
+        call file_exists
+        jc .bad
+        mov si, msg_notprog1
+        call print
+        mov si, cmdname
+        call print
+        mov si, msg_notprog2
+        call print
+        mov si, cmdname
+        call print
+        jmp newline
+.program:
         mov si, cmdname
         mov di, progpath
         call strcpy
@@ -1118,6 +1136,8 @@ crlf          db 13, 10, 0
 autoexec_name db '\AUTOEXEC.BAT', 0
 msg_ver       db 'TinyDOS version 1.0 (rusty486)', 13, 10, 0
 msg_badcmd    db 'Bad command or file name', 13, 10, 0
+msg_notprog1  db 'Not a program: ', 0
+msg_notprog2  db '. To view it, type: TYPE ', 0
 msg_baddrive  db 'Invalid drive specification', 13, 10, 0
 msg_baddir    db 'Invalid directory', 13, 10, 0
 msg_mdfail    db 'Unable to create directory', 13, 10, 0

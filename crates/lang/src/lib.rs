@@ -33,7 +33,7 @@ use lexer::Span;
 use x86::Abs;
 
 /// Where compiled programs are linked.
-pub const LOAD_ADDR: u32 = 0xC0_0000;
+pub const LOAD_ADDR: u32 = 0x200_0000;
 
 /// Prelude line numbers are offset so errors in it are recognisable.
 const PRELUDE_LINE: u32 = 100_000;

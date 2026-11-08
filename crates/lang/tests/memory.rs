@@ -32,6 +32,7 @@ fn compiling_a_large_program_stays_small() {
     let exe = rusty486_lang::compile(&src).unwrap();
     let peak = (PEAK.load(Relaxed) - base) / 1024;
     println!("compile peak (power-of-two classes): {peak} KB, exe {}", exe.len());
-    // Measured with 64-bit pointers; the IDE (32-bit) needs less.
-    assert!(peak < 4600, "{peak} KB");
+    // Measured with 64-bit pointers; the IDE (32-bit) needs less. Its heap
+    // is 28 MB (4-32 MB), so this leaves a wide margin.
+    assert!(peak < 8192, "{peak} KB");
 }

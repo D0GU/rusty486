@@ -17,7 +17,7 @@ pub struct PmImage<'a> {
     /// `extern "C" fn(systab: *const u32) -> u8`.
     pub entry: u32,
     pub stack_top: u32,
-    /// End of the heap handed to the program (0 = the stub's default, 15 MB).
+    /// End of the heap handed to the program (0 = the top of RAM).
     pub heap_end: u32,
 }
 

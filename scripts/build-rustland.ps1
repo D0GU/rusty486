@@ -20,8 +20,8 @@ $elf = Join-Path $root "crates\rustland\target\i586-unknown-linux-gnu\release\ru
 $exe = Join-Path $root "dos\rustland\RUSTLAND.EXE"
 Push-Location $root
 try {
-    # Heap up to 12 MB: programs run from the IDE load at 12 MB.
-    & $cargo run --quiet --release -p rusty486-lang --bin pmpack -- $elf $exe C00000
+    # Heap up to 32 MB: programs run from the IDE load at 32 MB.
+    & $cargo run --quiet --release -p rusty486-lang --bin pmpack -- $elf $exe 2000000
     if ($LASTEXITCODE -ne 0) { throw "pmpack failed" }
     # R++ Write, the word processor in C:\WRITE.
     & $cargo run --quiet --release -p rusty486-lang --bin rppc -- dos/rustland/examples/WRITE.RS dos/write/WRITE.EXE

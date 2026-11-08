@@ -305,6 +305,22 @@ fn main() {
 }
 
 #[test]
+fn literal_branches_take_the_other_branch_type() {
+    expect(
+        r#"
+fn f(i: usize) -> usize {
+    let li = if i == 0 { 0 } else { i - 1 };
+    let w: u32 = 7;
+    let x = if w > 3 { 1 } else { w * 2 };
+    li + x as usize
+}
+fn main() { println!("{} {}", f(0), f(5)); }
+"#,
+        "1 5",
+    );
+}
+
+#[test]
 fn big_statics_and_memory_moves() {
     expect(
         r#"

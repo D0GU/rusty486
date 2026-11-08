@@ -77,6 +77,10 @@ examples are in `C:\RPP`: `CD RPP`, `RUSTLAND SNAKE`). Ctrl+F9 compiles and
 runs, Alt+F9 compiles, F1 has the language reference. See
 [Rustland R++](#rustland-r) below.
 
+**Memory:** the machine has 128 MB of RAM. Rustland runs at 4-32 MB; R++
+programs load at 32 MB and their heap runs to the top of RAM (the DOS
+extender asks the BIOS how much there is).
+
 ## Rustland R++
 
 ![Rustland R++ with the Compile menu open](docs/rustland.png)
@@ -87,7 +91,7 @@ DOS extender stub (`dos/pmstub.asm`): the stub loads the 32-bit image above
 1 MB, switches to flat protected mode and thunks back to real mode for DOS and
 BIOS calls. The compiler (`crates/lang`, `no_std` + `alloc`) is the same
 crate the host tests use; it emits x86 machine code directly and packs the
-program with the same stub, linked at 12 MB.
+program with the same stub, linked at 32 MB (the IDE uses 4-32 MB).
 
 - **Editor:** menus (F10/Alt+letter), syntax colours, insert/overwrite,
   Shift+arrow selection, Ctrl+Ins/Shift+Ins/Shift+Del clipboard, undo
@@ -127,16 +131,20 @@ writing books, written in R++ on a small ncurses-style library. Type
   Delete, with prompts for unsaved changes. `.WP` keeps all formatting;
   export writes Markdown-style text (`#` chapter, `##` section, `>` quote),
   which Open imports.
-- **Formatting:** bold, italic, underline, left/centre/right/justified
-  paragraphs; paragraph styles for chapter and section headings, block
-  quotes, scene breaks and writer's notes (kept out of the word count and
-  the export).
+- **Formatting:** bold, italic, underline, strikethrough, highlighting,
+  change case, left/centre/right/justified paragraphs; paragraph styles for
+  chapter and section headings, block quotes, scene breaks, bullet and
+  numbered lists, and writer's notes (kept out of the word count and the
+  export).
 - **Book tools:** chapter outline with word counts and pages (F5), page
   breaks, statistics (F9), a session word goal with a progress bar, focus
-  mode (F7), typewriter scrolling, first-line indents, auto-save.
-- **Editing:** selection, cut/copy/paste, undo, find, replace all, go to
-  page, word and chapter movement; documents up to 200,000 characters,
-  after which it offers to continue in the next numbered file (BOOK2.WP...).
+  mode (F7), typewriter scrolling, auto-save.
+- **Settings (F8):** first-line indent on/off and size, space between
+  paragraphs, page length, word goal, colours; saved automatically.
+- **Editing:** selection, cut/copy/paste, multi-step undo (a log of
+  changes), find, replace all, go to page, word and chapter movement;
+  documents up to 2,000,000 characters (about 330,000 words), after which
+  it offers to continue in the next numbered file (BOOK2.WP...).
 - **Colours:** Borland Blue, Paper, Amber and Midnight themes, saved with
   the other options in `WRITE.CFG`.
 
@@ -288,6 +296,7 @@ cargo test -p rusty486-lang --release   # R++ programs and the IDE, run under Ti
 
 | Device | Ports / memory |
 |--------|----------------|
+| RAM | 128 MB (640 KB conventional + extended); INT 15h 88h/E801h, CMOS 17h/30h/34h |
 | Disk controller (custom, bus-mastering) | 300h-317h, see `crates/core/src/devices/disk.rs` |
 | Text video + CRTC cursor | B8000h, 3D4h/3D5h |
 | Fast A20 gate | 92h |

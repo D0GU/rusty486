@@ -1,4 +1,4 @@
-// WRITE.RS - R++ Write 2.0, a word processor for writing books.
+// WRITE.RS - R++ Write 2.1, a word processor for writing books.
 //
 // Part 1: a small ncurses-style screen library.
 // Part 2: the document (text + styles), word wrapping and pages.
@@ -11,6 +11,8 @@ const A_BOLD: u32 = 0x100;
 const A_REVERSE: u32 = 0x200;
 const A_UNDERLINE: u32 = 0x400;
 const A_ITALIC: u32 = 0x800;
+const A_STRIKE: u32 = 0x1000;
+const A_MARK: u32 = 0x2000;
 
 // Keys: ASCII (and Ctrl+letter = 1..26), 0x100 + scan code for special
 // keys, 0x300 + scan with Ctrl held, 0x400 + scan with Alt held.
@@ -48,6 +50,9 @@ static mut SHIFT: bool = false;
 static mut ITALIC_FG: u8 = 10;
 static mut UNDER_FG: u8 = 11;
 static mut BOLD_FG: u8 = 255;
+static mut STRIKE_FG: u8 = 8;
+static mut MARK_BG: u8 = 6;
+static mut MARK_FG: u8 = 255;
 
 fn init_pair(n: u32, fg: u8, bg: u8) {
     unsafe { PAIRS[n as usize] = fg | (bg << 4); }
@@ -57,7 +62,16 @@ fn vga(a: u32) -> u8 {
     unsafe {
         let c = PAIRS[(a & 0x1F) as usize];
         let mut fg = c & 0x0F;
-        let bg = c >> 4;
+        let mut bg = c >> 4;
+        if a & A_MARK != 0 {
+            bg = MARK_BG;
+            if MARK_FG != 255 {
+                fg = MARK_FG;
+            }
+        }
+        if a & A_STRIKE != 0 {
+            fg = STRIKE_FG;
+        }
         if a & A_UNDERLINE != 0 {
             fg = UNDER_FG;
         }
@@ -297,8 +311,12 @@ fn sb() -> &'static str {
 
 // ===================================================== 2. the document
 
-const MAXT: usize = 200000;
-const MAXL: usize = 12000;
+// Two million characters (about 330,000 words, a few novels' worth): text
+// and styles take 4 MB of the 96 MB R++ programs get on a 128 MB machine.
+const MAXT: usize = 2000000;
+const MAXL: usize = 80000;
+// Lines re-wrapped at once; bigger changes re-wrap the whole document.
+const TMAXL: usize = 4096;
 const PW: usize = 64;
 const PX: i32 = 8;
 
@@ -306,6 +324,9 @@ const PX: i32 = 8;
 const S_BOLD: u8 = 1;
 const S_ITALIC: u8 = 2;
 const S_UNDER: u8 = 4;
+const S_STRIKE: u8 = 8;
+const S_MARK: u8 = 16;
+const S_ALL: u8 = 31;
 
 // Paragraph styles live in the style byte of the '\n' that ends the
 // paragraph: kind in bits 0-2, alignment in bits 4-5.
@@ -315,14 +336,16 @@ const K_SECTION: u8 = 2;
 const K_QUOTE: u8 = 3;
 const K_SCENE: u8 = 4;
 const K_NOTE: u8 = 5;
+const K_BULLET: u8 = 6;
+const K_NUMBER: u8 = 7;
 
 const AL_LEFT: u8 = 0;
 const AL_CENTER: u8 = 1;
 const AL_RIGHT: u8 = 2;
 const AL_JUSTIFY: u8 = 3;
 
-static mut TEXT: [u8; 200000] = [0; 200000];
-static mut STYLE: [u8; 200000] = [0; 200000];
+static mut TEXT: [u8; 2000000] = [0; 2000000];
+static mut STYLE: [u8; 2000000] = [0; 2000000];
 static mut LEN: usize = 0;
 static mut CUR: usize = 0;
 static mut ANCHOR: usize = 0;
@@ -333,30 +356,34 @@ static mut DIRTY: bool = false;
 static mut EDITS: u32 = 0;
 
 // Wrapped lines: start, length, flags (1 = last line of its paragraph,
-// 2 = first), paragraph style, indent, width and word count.
-static mut LSTART: [u32; 12000] = [0; 12000];
-static mut LLEN: [u32; 12000] = [0; 12000];
-static mut LFL: [u8; 12000] = [0; 12000];
-static mut LPS: [u8; 12000] = [0; 12000];
-static mut LIND: [u8; 12000] = [0; 12000];
-static mut LAW: [u8; 12000] = [0; 12000];
-static mut LWORDS: [u16; 12000] = [0; 12000];
+// 2 = first, 4 = blank spacer after a paragraph), paragraph style, indent,
+// width and word count.
+static mut LSTART: [u32; 80000] = [0; 80000];
+static mut LLEN: [u32; 80000] = [0; 80000];
+static mut LFL: [u8; 80000] = [0; 80000];
+static mut LPS: [u8; 80000] = [0; 80000];
+static mut LIND: [u8; 80000] = [0; 80000];
+static mut LAW: [u8; 80000] = [0; 80000];
+static mut LWORDS: [u16; 80000] = [0; 80000];
 static mut NLINES: usize = 0;
 static mut WORDS: u32 = 0;
 
 // Lines being built by a re-layout.
-static mut TSTART: [u32; 12000] = [0; 12000];
-static mut TLEN: [u32; 12000] = [0; 12000];
-static mut TFL: [u8; 12000] = [0; 12000];
-static mut TPS: [u8; 12000] = [0; 12000];
-static mut TIND: [u8; 12000] = [0; 12000];
-static mut TAW: [u8; 12000] = [0; 12000];
-static mut TWORDS: [u16; 12000] = [0; 12000];
+static mut TSTART: [u32; 4096] = [0; 4096];
+static mut TLEN: [u32; 4096] = [0; 4096];
+static mut TFL: [u8; 4096] = [0; 4096];
+static mut TPS: [u8; 4096] = [0; 4096];
+static mut TIND: [u8; 4096] = [0; 4096];
+static mut TAW: [u8; 4096] = [0; 4096];
+static mut TWORDS: [u16; 4096] = [0; 4096];
 static mut NT: usize = 0;
+static mut T_OVER: bool = false;
 
 // Settings.
 static mut THEME: u32 = 0;
 static mut FIRST_INDENT: bool = true;
+static mut INDENT: usize = 4;
+static mut PARA_SPACE: bool = false;
 static mut AUTOSAVE: bool = true;
 static mut SHOW_BREAKS: bool = true;
 static mut TYPEWRITER: bool = false;
@@ -400,7 +427,8 @@ fn para_indent(st: u8, first: bool) -> usize {
         match kind_of(st) {
             K_QUOTE => 6,
             K_NOTE => 2,
-            K_NORMAL => if first && FIRST_INDENT && align_of(st) != AL_CENTER && align_of(st) != AL_RIGHT { 4 } else { 0 },
+            K_BULLET | K_NUMBER => 4,
+            K_NORMAL => if first && FIRST_INDENT && align_of(st) != AL_CENTER && align_of(st) != AL_RIGHT { INDENT } else { 0 },
             _ => 0,
         }
     }
@@ -409,7 +437,7 @@ fn para_indent(st: u8, first: bool) -> usize {
 fn para_width(st: u8, first: bool) -> usize {
     match kind_of(st) {
         K_QUOTE => PW - 12,
-        K_NOTE => PW - 4,
+        K_NOTE | K_BULLET | K_NUMBER => PW - 4,
         _ => PW - para_indent(st, first),
     }
 }
@@ -432,7 +460,8 @@ fn count_words(s: usize, n: usize) -> u16 {
 
 fn push_line(s: usize, n: usize, fl: u8, st: u8, ind: usize, w: usize) {
     unsafe {
-        if NT >= MAXL {
+        if NT >= TMAXL {
+            T_OVER = true;
             return;
         }
         TSTART[NT] = s as u32;
@@ -458,6 +487,10 @@ fn layout_para(p: usize, q: usize) {
             let ff: u8 = if first { 2 } else { 0 };
             if q - s <= w {
                 push_line(s, q - s, ff | 1, st, ind, w);
+                // Space between paragraphs: a blank spacer line.
+                if PARA_SPACE {
+                    push_line(q, 0, 4, st, 0, 0);
+                }
                 return;
             }
             let mut b = s + w;
@@ -511,11 +544,17 @@ fn relayout(a: usize, z: usize, d: i32) {
         let z_old = (z as i32 - d) as usize;
         let lb = first_line_ge(z_old + 1);
         NT = 0;
+        T_OVER = false;
         let mut p = a;
         while p <= z {
             let q = para_end(p);
             layout_para(p, q);
             p = q + 1;
+        }
+        if T_OVER {
+            // Too many new lines for the buffer: re-wrap everything.
+            full_layout();
+            return;
         }
         for i in la..lb {
             WORDS -= LWORDS[i] as u32;
@@ -545,18 +584,49 @@ fn relayout(a: usize, z: usize, d: i32) {
     }
 }
 
+// Wrap the whole document, one paragraph at a time.
 fn full_layout() {
     unsafe {
         NLINES = 0;
         WORDS = 0;
-        relayout(0, LEN - 1, 0);
+        let mut p: usize = 0;
+        while p < LEN {
+            let q = para_end(p);
+            NT = 0;
+            T_OVER = false;
+            layout_para(p, q);
+            let mut nt = NT;
+            if NLINES + nt > MAXL {
+                nt = MAXL - NLINES;
+            }
+            let la = NLINES;
+            copy_bytes(LSTART.as_mut_ptr().add(la) as *mut u8, TSTART.as_ptr() as *const u8, nt * 4);
+            copy_bytes(LLEN.as_mut_ptr().add(la) as *mut u8, TLEN.as_ptr() as *const u8, nt * 4);
+            copy_bytes(LWORDS.as_mut_ptr().add(la) as *mut u8, TWORDS.as_ptr() as *const u8, nt * 2);
+            copy_bytes(LFL.as_mut_ptr().add(la), TFL.as_ptr(), nt);
+            copy_bytes(LPS.as_mut_ptr().add(la), TPS.as_ptr(), nt);
+            copy_bytes(LIND.as_mut_ptr().add(la), TIND.as_ptr(), nt);
+            copy_bytes(LAW.as_mut_ptr().add(la), TAW.as_ptr(), nt);
+            for t in 0..nt {
+                WORDS += TWORDS[t] as u32;
+            }
+            NLINES += nt;
+            p = q + 1;
+        }
     }
 }
 
-// The line holding position pos (the last line starting at or before it).
+// The line holding position pos (the last text line starting at or
+// before it; spacer lines are skipped).
 fn line_of(pos: usize) -> usize {
     let i = first_line_ge(pos + 1);
-    if i == 0 { 0 } else { i - 1 }
+    let mut li = if i == 0 { 0 } else { i - 1 };
+    unsafe {
+        while li > 0 && LFL[li] & 4 != 0 {
+            li -= 1;
+        }
+    }
+    li
 }
 
 // Page column of character col of line i, after indent and alignment.
@@ -607,64 +677,158 @@ fn line_x(i: usize, col: usize) -> usize {
 }
 
 // ----------------------------------------------------- undo
+//
+// Undo keeps a log of changes rather than copies of the document, so it
+// costs memory only for what changed. Records: a header (type, position,
+// count), data, and the record length at the end so the log can be read
+// backwards. A MARK record starts each undo step.
 
-const UNDO_N: usize = 3;
-static mut UNDO_BUF: [u32; 3] = [0; 3];
-static mut UNDO_LEN: [usize; 3] = [0; 3];
-static mut UNDO_CUR: [usize; 3] = [0; 3];
-static mut UNDO_COUNT: usize = 0;
-static mut UNDO_NEXT: usize = 0;
+const U_MARK: u8 = 0;
+const U_INS: u8 = 1;
+const U_DEL: u8 = 2;
+const U_STYLE: u8 = 3;
+const U_TEXT: u8 = 4;
+const ULOG_CAP: usize = 1048576;
+
+static mut ULOG: [u8; 1048576] = [0; 1048576];
+static mut ULEN: usize = 0;
+static mut LOGGING: bool = true;
 static mut LAST_KIND: u32 = 0;
 
-fn undo_init() {
+fn ulog_u32(at: usize, v: u32) {
     unsafe {
-        for i in 0..UNDO_N {
-            UNDO_BUF[i] = alloc(MAXT * 2) as u32;
+        ULOG[at] = (v & 0xFF) as u8;
+        ULOG[at + 1] = ((v >> 8) & 0xFF) as u8;
+        ULOG[at + 2] = ((v >> 16) & 0xFF) as u8;
+        ULOG[at + 3] = (v >> 24) as u8;
+    }
+}
+
+fn ulog_get(at: usize) -> u32 {
+    unsafe { ULOG[at] as u32 | (ULOG[at + 1] as u32) << 8 | (ULOG[at + 2] as u32) << 16 | (ULOG[at + 3] as u32) << 24 }
+}
+
+// Data bytes of a record of this type and count.
+fn ulog_data(t: u8, n: usize) -> usize {
+    match t {
+        U_DEL => 2 * n,
+        U_STYLE | U_TEXT => n,
+        _ => 0,
+    }
+}
+
+// Start a record with room for `data` bytes; returns where the data goes,
+// or None when undo is off or the change is too big to remember.
+fn ulog_begin(t: u8, pos: usize, n: usize) -> usize {
+    unsafe {
+        if !LOGGING {
+            return 0;
+        }
+        let size = 9 + ulog_data(t, n) + 4;
+        if size > ULOG_CAP / 2 {
+            // Too big to undo: forget the history instead.
+            ULEN = 0;
+            return 0;
+        }
+        if ULEN + size > ULOG_CAP {
+            // Drop the oldest steps (whole records) to make room.
+            let mut cut: usize = 0;
+            while cut < ULEN && (cut < ULEN / 2 || ULOG[cut] != U_MARK) {
+                let rt = ULOG[cut];
+                let rn = ulog_get(cut + 5) as usize;
+                cut += 9 + ulog_data(rt, rn) + 4;
+            }
+            move_bytes(ULOG.as_mut_ptr(), ULOG.as_ptr().add(cut), ULEN - cut);
+            ULEN -= cut;
+        }
+        let at = ULEN;
+        ULOG[at] = t;
+        ulog_u32(at + 1, pos as u32);
+        ulog_u32(at + 5, n as u32);
+        ulog_u32(at + size - 4, size as u32);
+        ULEN += size;
+        at + 9
+    }
+}
+
+// Remember styles (or text) at pos..pos+n before they change.
+fn log_style(pos: usize, n: usize) {
+    unsafe {
+        let d = ulog_begin(U_STYLE, pos, n);
+        if d > 0 {
+            copy_bytes(ULOG.as_mut_ptr().add(d), STYLE.as_ptr().add(pos), n);
         }
     }
 }
 
-// Remember the document before an edit. Runs of typing (kind 1) or
-// deleting (kind 2) share one undo step.
+fn log_text(pos: usize, n: usize) {
+    unsafe {
+        let d = ulog_begin(U_TEXT, pos, n);
+        if d > 0 {
+            copy_bytes(ULOG.as_mut_ptr().add(d), TEXT.as_ptr().add(pos), n);
+        }
+    }
+}
+
+// Start an undo step. Runs of typing (kind 1) or deleting (kind 2) share
+// one step.
 fn undo_mark(kind: u32) {
     unsafe {
         if kind != 0 && kind == LAST_KIND {
             return;
         }
         LAST_KIND = kind;
-        let slot = UNDO_NEXT;
-        let p = UNDO_BUF[slot] as *mut u8;
-        copy_bytes(p, TEXT.as_ptr(), LEN);
-        copy_bytes(p.add(MAXT), STYLE.as_ptr(), LEN);
-        UNDO_LEN[slot] = LEN;
-        UNDO_CUR[slot] = CUR;
-        UNDO_NEXT = (slot + 1) % UNDO_N;
-        if UNDO_COUNT < UNDO_N {
-            UNDO_COUNT += 1;
-        }
+        ulog_begin(U_MARK, CUR, 0);
+    }
+}
+
+fn undo_clear() {
+    unsafe {
+        ULEN = 0;
+        LAST_KIND = 0;
     }
 }
 
 fn undo() {
     unsafe {
-        if UNDO_COUNT == 0 {
+        if ULEN == 0 {
             set_msg("Nothing to undo");
             return;
         }
-        UNDO_NEXT = (UNDO_NEXT + UNDO_N - 1) % UNDO_N;
-        UNDO_COUNT -= 1;
-        let p = UNDO_BUF[UNDO_NEXT] as *const u8;
-        LEN = UNDO_LEN[UNDO_NEXT];
-        copy_bytes(TEXT.as_mut_ptr(), p, LEN);
-        copy_bytes(STYLE.as_mut_ptr(), p.add(MAXT), LEN);
-        CUR = UNDO_CUR[UNDO_NEXT];
+        LOGGING = false;
+        while ULEN > 0 {
+            let size = ulog_get(ULEN - 4) as usize;
+            let at = ULEN - size;
+            let t = ULOG[at];
+            let pos = ulog_get(at + 1) as usize;
+            let n = ulog_get(at + 5) as usize;
+            ULEN = at;
+            match t {
+                U_MARK => {
+                    CUR = pos;
+                    break;
+                }
+                U_INS => del_bytes(pos, n),
+                U_DEL => {
+                    ins_bytes(pos, ULOG.as_ptr().add(at + 9), ULOG.as_ptr().add(at + 9 + n), n);
+                }
+                U_STYLE => {
+                    copy_bytes(STYLE.as_mut_ptr().add(pos), ULOG.as_ptr().add(at + 9), n);
+                    relayout(para_start(pos), para_end(pos + n - 1), 0);
+                }
+                _ => {
+                    copy_bytes(TEXT.as_mut_ptr().add(pos), ULOG.as_ptr().add(at + 9), n);
+                    relayout(para_start(pos), para_end(pos + n - 1), 0);
+                }
+            }
+        }
+        LOGGING = true;
         if CUR >= LEN {
             CUR = LEN - 1;
         }
         SEL = false;
         LAST_KIND = 0;
         DIRTY = true;
-        full_layout();
         set_msg("Undone");
     }
 }
@@ -686,10 +850,11 @@ static mut FULL_WARNED: bool = false;
 // Insert n characters with styles at pos; false if the document is full.
 fn ins_bytes(pos: usize, t: *const u8, s: *const u8, n: usize) -> bool {
     unsafe {
-        if LEN + n > MAXT {
+        if LEN + n > MAXT || NLINES + 64 > MAXL {
             FULL_PENDING = true;
             return false;
         }
+        ulog_begin(U_INS, pos, n);
         move_bytes(TEXT.as_mut_ptr().add(pos + n), TEXT.as_ptr().add(pos), LEN - pos);
         move_bytes(STYLE.as_mut_ptr().add(pos + n), STYLE.as_ptr().add(pos), LEN - pos);
         copy_bytes(TEXT.as_mut_ptr().add(pos), t, n);
@@ -708,6 +873,9 @@ fn ins_bytes(pos: usize, t: *const u8, s: *const u8, n: usize) -> bool {
 fn del_bytes(pos: usize, count: usize) {
     unsafe {
         let mut n = count;
+        if pos >= LEN - 1 {
+            return;
+        }
         if pos + n >= LEN {
             n = LEN - 1 - pos;
         }
@@ -718,11 +886,17 @@ fn del_bytes(pos: usize, count: usize) {
         let first_end = para_end(pos);
         let keep = STYLE[first_end];
         let joins = first_end < pos + n;
+        let d = ulog_begin(U_DEL, pos, n);
+        if d > 0 {
+            copy_bytes(ULOG.as_mut_ptr().add(d), TEXT.as_ptr().add(pos), n);
+            copy_bytes(ULOG.as_mut_ptr().add(d + n), STYLE.as_ptr().add(pos), n);
+        }
         move_bytes(TEXT.as_mut_ptr().add(pos), TEXT.as_ptr().add(pos + n), LEN - pos - n);
         move_bytes(STYLE.as_mut_ptr().add(pos), STYLE.as_ptr().add(pos + n), LEN - pos - n);
         LEN -= n;
         let q = para_end(pos);
         if joins && pos > ps {
+            log_style(q, 1);
             STYLE[q] = keep;
         }
         relayout(ps, q, 0 - n as i32);
@@ -802,6 +976,7 @@ fn new_paragraph() {
         }
         if at_end {
             let q2 = CUR;
+            log_style(q2, 1);
             STYLE[q2] = 0;
             TYPING = 0;
             relayout(para_start(q2), q2, 0);
@@ -847,13 +1022,14 @@ fn delete_paragraph() {
     }
 }
 
-// Ctrl+B/I/U: style the selection, or switch the style for new text.
+// Ctrl+B/I/U/T/K: style the selection, or switch the style for new text.
 fn toggle_style(bit: u8) {
     unsafe {
         if has_sel() {
             undo_mark(0);
             let a = sel_a();
             let b = sel_b();
+            log_style(a, b - a);
             let mut all = true;
             for i in a..b {
                 if TEXT[i] != b'\n' && STYLE[i] & bit == 0 {
@@ -879,6 +1055,7 @@ fn plain_text() {
             undo_mark(0);
             let a = sel_a();
             let b = sel_b();
+            log_style(a, b - a);
             for i in a..b {
                 if TEXT[i] != b'\n' {
                     STYLE[i] = 0;
@@ -901,11 +1078,38 @@ fn set_para(mask: u8, value: u8) {
         let mut p = para_start(a);
         loop {
             let q = para_end(p);
+            log_style(q, 1);
             STYLE[q] = (STYLE[q] & !mask) | value;
             if q >= b || q + 1 >= LEN {
                 break;
             }
             p = q + 1;
+        }
+        relayout(para_start(a), para_end(b), 0);
+        changed();
+    }
+}
+
+// Format > Change case: 0 UPPER, 1 lower, 2 Title Case.
+fn change_case(mode: u32) {
+    unsafe {
+        if !has_sel() {
+            set_msg("Select text first");
+            return;
+        }
+        undo_mark(0);
+        let a = sel_a();
+        let b = sel_b();
+        log_text(a, b - a);
+        let mut start = true;
+        for i in a..b {
+            let c = TEXT[i];
+            TEXT[i] = match mode {
+                0 => c.to_ascii_uppercase(),
+                1 => c.to_ascii_lowercase(),
+                _ => if start { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() },
+            };
+            start = c == b' ' || c == b'\n' || c == b'-';
         }
         relayout(para_start(a), para_end(b), 0);
         changed();
@@ -1032,6 +1236,9 @@ fn apply_theme(t: u32) {
         init_pair(P_STATUS, 0, 3);
         init_pair(P_STATUS_HI, 15, 3);
         BOLD_FG = 255;
+        STRIKE_FG = 8;
+        MARK_BG = 6;
+        MARK_FG = 255;
         match t {
             1 => {
                 DESK_CH = 0xB0;
@@ -1049,6 +1256,7 @@ fn apply_theme(t: u32) {
                 ITALIC_FG = 2;
                 UNDER_FG = 6;
                 BOLD_FG = 1;
+                MARK_FG = 0;
             }
             2 => {
                 DESK_CH = 0xB0;
@@ -1082,6 +1290,7 @@ fn apply_theme(t: u32) {
                 ITALIC_FG = 12;
                 UNDER_FG = 14;
                 BOLD_FG = 14;
+                MARK_FG = 0;
             }
             3 => {
                 DESK_CH = 0xB0;
@@ -1102,6 +1311,8 @@ fn apply_theme(t: u32) {
                 init_pair(P_SCENE, 11, 0);
                 ITALIC_FG = 10;
                 UNDER_FG = 13;
+                MARK_BG = 5;
+                MARK_FG = 15;
             }
             _ => {
                 DESK_CH = 0xB1;
@@ -1202,6 +1413,11 @@ fn scroll_to_cursor() {
         if li < TOP {
             TOP = li;
         }
+        // Jump close first: stepping one line at a time from far above is
+        // quadratic (row_of counts from TOP) and froze on big documents.
+        if li >= TOP + ph {
+            TOP = li + 1 - ph;
+        }
         while row_of(li) >= ph {
             TOP += 1;
         }
@@ -1222,6 +1438,12 @@ fn char_attr(i: usize, st: u8) -> u32 {
     if cs & S_BOLD != 0 {
         a = a | A_BOLD;
     }
+    if cs & S_STRIKE != 0 {
+        a = a | A_STRIKE;
+    }
+    if cs & S_MARK != 0 {
+        a = a | A_MARK;
+    }
     if cs & S_ITALIC != 0 {
         a = a | A_ITALIC;
     }
@@ -1231,11 +1453,40 @@ fn char_attr(i: usize, st: u8) -> u32 {
     a
 }
 
+// The number of a numbered-list paragraph starting at p.
+fn list_number(p: usize) -> u32 {
+    let mut n: u32 = 1;
+    let mut ps = p;
+    unsafe {
+        while ps > 0 && kind_of(STYLE[ps - 1]) == K_NUMBER {
+            n += 1;
+            ps = para_start(ps - 1);
+        }
+    }
+    n
+}
+
 fn draw_line(i: usize, y: i32) {
     unsafe {
+        if LFL[i] & 4 != 0 {
+            return; // spacer between paragraphs
+        }
         let s = LSTART[i] as usize;
         let n = LLEN[i] as usize;
         let st = LPS[i];
+        // List markers in the hanging indent of the first line.
+        if LFL[i] & 2 != 0 && kind_of(st) == K_BULLET {
+            attrset(P_TEXT);
+            mv(y, PX + LIND[i] as i32 - 3);
+            addch(0xFE);
+        }
+        if LFL[i] & 2 != 0 && kind_of(st) == K_NUMBER {
+            sb_clear();
+            sb_num(list_number(s));
+            sb_char(b'.');
+            attrset(P_TEXT);
+            mvaddstr(y, PX + LIND[i] as i32 - 1 - SBLEN as i32, sb());
+        }
         let sa = if has_sel() { sel_a() } else { 0 };
         let sb2 = if has_sel() { sel_b() } else { 0 };
         if kind_of(st) == K_NOTE {
@@ -1335,20 +1586,25 @@ fn draw_status() {
         sb_num(WORDS);
         sb_str(" words");
         mvaddstr(24, 0, sb());
-        // Session goal: words written since opening, with a bar.
+        // Session goal: words written since opening, with a bar. It moves
+        // right (and the bar shrinks) when the numbers on the left are long.
+        let left = SBLEN as i32;
+        let gx = if left + 2 > 38 { left + 2 } else { 38 };
         let done = SESSION_CARRY + if WORDS > SESSION_BASE { WORDS - SESSION_BASE } else { 0 };
         sb_clear();
         sb_str("+");
         sb_num(done);
         sb_str("/");
         sb_num(GOAL);
-        mvaddstr(24, 38, sb());
-        mv(24, 50);
-        let filled: u32 = if GOAL == 0 { 10 } else if done >= GOAL { 10 } else { done * 10 / GOAL };
+        mvaddstr(24, gx, sb());
+        let bx = gx + SBLEN as i32 + 1;
+        let bw = if 60 - bx > 10 { 10 } else if 60 - bx > 0 { 60 - bx } else { 0 };
+        mv(24, bx);
+        let filled: i32 = if GOAL == 0 || done >= GOAL { bw } else { (done * bw as u32 / GOAL) as i32 };
         attrset(P_STATUS_HI);
-        hline(0xDB, filled as i32);
+        hline(0xDB, filled);
         attrset(P_STATUS);
-        hline(0xB0, 10 - filled as i32);
+        hline(0xB0, bw - filled);
         if MSGLEN > 0 {
             attrset(P_STATUS_HI);
             mv(24, 61);
@@ -1360,24 +1616,34 @@ fn draw_status() {
             return;
         }
         let st = STYLE[para_end(CUR)];
-        mvaddstr(24, 62, match kind_of(st) {
+        mvaddstr(24, 61, match kind_of(st) {
             K_CHAPTER => "Chapter",
             K_SECTION => "Section",
             K_QUOTE => "Quote",
             K_SCENE => "Scene",
             K_NOTE => "Note",
+            K_BULLET => "Bullets",
+            K_NUMBER => "Numbered",
             _ => "Normal",
         });
         mv(24, 70);
-        if TYPING & S_BOLD != 0 { attrset(P_STATUS_HI); addch(b'B'); } else { attrset(P_STATUS); addch(b'b'); }
-        if TYPING & S_ITALIC != 0 { attrset(P_STATUS_HI); addch(b'I'); } else { attrset(P_STATUS); addch(b'i'); }
-        if TYPING & S_UNDER != 0 { attrset(P_STATUS_HI); addch(b'U'); } else { attrset(P_STATUS); addch(b'u'); }
+        let flags = [S_BOLD, S_ITALIC, S_UNDER, S_STRIKE, S_MARK];
+        let letters = b"BIUSH";
+        for f in 0..5 {
+            if TYPING & flags[f] != 0 {
+                attrset(P_STATUS_HI);
+                addch(letters[f]);
+            } else {
+                attrset(P_STATUS);
+                addch(letters[f].to_ascii_lowercase());
+            }
+        }
         attrset(P_STATUS);
-        mvaddstr(24, 74, match align_of(st) {
-            AL_CENTER => "Cntr",
-            AL_RIGHT => "Rght",
-            AL_JUSTIFY => "Just",
-            _ => "Left",
+        mvaddstr(24, 76, match align_of(st) {
+            AL_CENTER => "Ctr",
+            AL_RIGHT => "Rgt",
+            AL_JUSTIFY => "Jst",
+            _ => "Lft",
         });
     }
 }
@@ -1453,7 +1719,7 @@ fn draw() {
 // ----------------------------------------------------- menus
 
 const NMENUS: usize = 9;
-static MENU_START: [usize; 10] = [0, 10, 17, 21, 30, 37, 40, 45, 50, 52];
+static MENU_START: [usize; 10] = [0, 10, 17, 21, 36, 46, 49, 54, 61, 63];
 
 fn menu_title(m: usize) -> &'static str {
     match m {
@@ -1511,33 +1777,44 @@ fn item_def(i: usize) -> &'static str {
         21 => "~B~old|Ctrl+B|30",
         22 => "~I~talic|Ctrl+I|31",
         23 => "~U~nderline|Ctrl+U|32",
-        24 => "~P~lain text|Ctrl+P|33",
-        25 => "-||0",
-        26 => "Align ~l~eft|Ctrl+L|34",
-        27 => "~C~enter|Ctrl+E|35",
-        28 => "Align ~r~ight|Ctrl+R|36",
-        29 => "~J~ustify|Ctrl+J|37",
-        30 => "~N~ormal text|Alt+1|40",
-        31 => "~C~hapter heading|Alt+2|41",
-        32 => "~S~ection heading|Alt+3|42",
-        33 => "Block ~q~uote|Alt+4|43",
-        34 => "Scene ~b~reak|Alt+5|44",
-        35 => "Writer's n~o~te|Alt+6|45",
-        36 => "~I~nsert scene break||65",
-        37 => "~F~ocus mode|F7|50",
-        38 => "~P~age breaks||51",
-        39 => "~T~ypewriter scrolling||52",
-        40 => "~O~utline...|F5|60",
-        41 => "~S~tatistics...|F9|61",
-        42 => "Word ~g~oal...||62",
-        43 => "~N~ext chapter|Ctrl+PgDn|63",
-        44 => "~P~revious chapter|Ctrl+PgUp|64",
-        45 => "~C~olors...||70",
-        46 => "~F~irst-line indent||71",
-        47 => "~A~uto-save||72",
-        48 => "Page ~l~ength...||73",
-        49 => "~S~ave options||74",
-        50 => "~K~eys|F1|80",
+        24 => "~S~trikethrough|Ctrl+T|38",
+        25 => "~H~ighlight|Ctrl+K|39",
+        26 => "~P~lain text|Ctrl+P|33",
+        27 => "-||0",
+        28 => "Align ~l~eft|Ctrl+L|34",
+        29 => "~C~enter|Ctrl+E|35",
+        30 => "Align ~r~ight|Ctrl+R|36",
+        31 => "~J~ustify|Ctrl+J|37",
+        32 => "-||0",
+        33 => "UPPERCASE||26",
+        34 => "l~o~wercase||27",
+        35 => "~T~itle Case||28",
+        36 => "~N~ormal text|Alt+1|40",
+        37 => "~C~hapter heading|Alt+2|41",
+        38 => "~S~ection heading|Alt+3|42",
+        39 => "Block ~q~uote|Alt+4|43",
+        40 => "Scene ~b~reak|Alt+5|44",
+        41 => "Writer's n~o~te|Alt+6|45",
+        42 => "B~u~llet list|Alt+7|46",
+        43 => "N~u~mbered list|Alt+8|47",
+        44 => "-||0",
+        45 => "~I~nsert scene break||65",
+        46 => "~F~ocus mode|F7|50",
+        47 => "~P~age breaks||51",
+        48 => "~T~ypewriter scrolling||52",
+        49 => "~O~utline...|F5|60",
+        50 => "~S~tatistics...|F9|61",
+        51 => "Word ~g~oal...||62",
+        52 => "~N~ext chapter|Ctrl+PgDn|63",
+        53 => "~P~revious chapter|Ctrl+PgUp|64",
+        54 => "~S~ettings...|F8|75",
+        55 => "~C~olors...||70",
+        56 => "-||0",
+        57 => "~F~irst-line indent||71",
+        58 => "Space ~b~etween paragraphs||76",
+        59 => "~A~uto-save||72",
+        60 => "Page ~l~ength...||73",
+        61 => "~K~eys|F1|80",
         _ => "~A~bout...||81",
     }
 }
@@ -1571,6 +1848,7 @@ fn cmd_checked(c: u32) -> bool {
             52 => TYPEWRITER,
             71 => FIRST_INDENT,
             72 => AUTOSAVE,
+            76 => PARA_SPACE,
             _ => false,
         }
     }
@@ -2097,7 +2375,7 @@ fn reset_doc() {
         TOP = 0;
         SEL = false;
         TYPING = 0;
-        UNDO_COUNT = 0;
+        undo_clear();
         LAST_KIND = 0;
         FULL_WARNED = false;
         FULL_PENDING = false;
@@ -2113,7 +2391,7 @@ fn after_load(name: &str) {
         SEL = false;
         DIRTY = false;
         EDITS = 0;
-        UNDO_COUNT = 0;
+        undo_clear();
         full_layout();
         SESSION_BASE = WORDS;
         FULL_WARNED = false;
@@ -2211,6 +2489,19 @@ fn finish_import_para(ps: usize) {
             cut = 2;
         } else if n == 5 && TEXT[ps] == b'*' && TEXT[ps + 2] == b'*' && TEXT[ps + 4] == b'*' {
             kind = K_SCENE;
+        } else if n >= 2 && (TEXT[ps] == b'-' || TEXT[ps] == b'*') && TEXT[ps + 1] == b' ' {
+            kind = K_BULLET;
+            cut = 2;
+        } else {
+            // "12. text": a numbered list item.
+            let mut d: usize = 0;
+            while d < n && d < 4 && TEXT[ps + d].is_ascii_digit() {
+                d += 1;
+            }
+            if d > 0 && d + 1 < n && TEXT[ps + d] == b'.' && TEXT[ps + d + 1] == b' ' {
+                kind = K_NUMBER;
+                cut = d + 2;
+            }
         }
         if cut > 0 {
             move_bytes(TEXT.as_mut_ptr().add(ps), TEXT.as_ptr().add(ps + cut), n - cut);
@@ -2283,20 +2574,36 @@ fn export_txt(name: &str) -> bool {
         }
         IOLEN = 0;
         let mut p: usize = 0;
+        let mut num: u32 = 0;
         while p < LEN {
             let q = para_end(p);
             let k = kind_of(STYLE[q]);
+            num = if k == K_NUMBER { num + 1 } else { 0 };
             if k != K_NOTE {
                 match k {
                     K_CHAPTER => out_str(h, "# "),
                     K_SECTION => out_str(h, "## "),
                     K_QUOTE => out_str(h, "> "),
+                    K_BULLET => out_str(h, "- "),
+                    K_NUMBER => {
+                        sb_clear();
+                        sb_num(num);
+                        sb_str(". ");
+                        out_str(h, sb());
+                    }
                     _ => {}
                 }
                 for i in p..q {
                     out_byte(h, TEXT[i]);
                 }
-                out_str(h, "\r\n\r\n");
+                // List items sit on consecutive lines; other paragraphs
+                // are separated by a blank line (Markdown).
+                let next_k = if q + 1 < LEN { kind_of(STYLE[para_end(q + 1)]) } else { K_NORMAL };
+                if (k == K_BULLET || k == K_NUMBER) && next_k == k {
+                    out_str(h, "\r\n");
+                } else {
+                    out_str(h, "\r\n\r\n");
+                }
             }
             p = q + 1;
         }
@@ -2553,10 +2860,24 @@ fn open_named(n: &str) {
     }
     set_input(sb());
     let name = input_text();
-    let ok = if is_txt(name) { load_txt(name) } else { load_wp(name) };
+    let txt = is_txt(name);
+    let ok = if txt { load_txt(name) } else { load_wp(name) };
     if ok {
         after_load(name);
         set_msg("Opened");
+        if txt {
+            // Saving writes the .WP format: never over the imported text.
+            sb_clear();
+            for c in name.bytes() {
+                if c == b'.' {
+                    break;
+                }
+                sb_char(c);
+            }
+            sb_str(".WP");
+            set_fname(sb());
+            set_msg("Imported");
+        }
     } else {
         reset_doc();
         full_layout();
@@ -2715,7 +3036,7 @@ fn next_in_sequence() {
 fn document_full() {
     unsafe {
         if !NAMED {
-            alert("Document Full", "This document has reached 200,000 characters.", "Save it first; then it can continue in a new file.");
+            alert("Document Full", "This document has reached 2,000,000 characters.", "Save it first; then it can continue in a new file.");
             if !save_as() {
                 return;
             }
@@ -2735,7 +3056,7 @@ fn document_full() {
         }
         q[ql] = b'?';
         ql += 1;
-        if message_box("Document Full", "This document has reached 200,000 characters.", str_from_bytes(&q[..ql]), "  ~Y~es  |  ~N~o  ") != 0 {
+        if message_box("Document Full", "This document has reached 2,000,000 characters.", str_from_bytes(&q[..ql]), "  ~Y~es  |  ~N~o  ") != 0 {
             set_msg("Document is full");
             return;
         }
@@ -2760,7 +3081,7 @@ fn document_full() {
         insert_str(str_from_bytes(&old[..ol]), 0);
         new_paragraph();
         SESSION_BASE = WORDS;
-        UNDO_COUNT = 0;
+        undo_clear();
         if save() {
             set_msg("New file started");
         }
@@ -2785,11 +3106,18 @@ fn load_options() {
             }
             GOAL = b[7] as u32 | (b[8] as u32) << 8;
         }
+        if n >= 11 && b[0] == b'W' {
+            INDENT = b[9] as usize;
+            if INDENT < 1 || INDENT > 12 {
+                INDENT = 4;
+            }
+            PARA_SPACE = b[10] != 0;
+        }
     }
 }
 
 fn save_options() {
-    let mut b = [0u8; 9];
+    let mut b = [0u8; 11];
     unsafe {
         b[0] = b'W';
         b[1] = THEME as u8;
@@ -2800,9 +3128,116 @@ fn save_options() {
         b[6] = PAGE_LINES as u8;
         b[7] = (GOAL & 0xFF) as u8;
         b[8] = (GOAL >> 8) as u8;
+        b[9] = INDENT as u8;
+        b[10] = PARA_SPACE as u8;
     }
-    if file_write("WRITE.CFG", &b) {
-        set_msg("Options saved");
+    file_write("WRITE.CFG", &b);
+}
+
+// Options > Settings (F8): every option in one place, applied at once and
+// saved automatically.
+fn settings_dialog() {
+    unsafe {
+        let n: usize = 9;
+        let mut sel: usize = 0;
+        loop {
+            draw();
+            dialog_box(3, 11, 19, 58, "Settings");
+            for r in 0..n {
+                let y = 5 + r as i32;
+                let a = if r == sel { P_LIST_SEL } else { P_DLG };
+                attrset(a);
+                mv(y, 13);
+                hline(b' ', 54);
+                let label = match r {
+                    0 => "First-line indent",
+                    1 => "Indent size",
+                    2 => "Space between paragraphs",
+                    3 => "Page breaks",
+                    4 => "Page length",
+                    5 => "Typewriter scrolling",
+                    6 => "Auto-save",
+                    7 => "Word goal (this session)",
+                    _ => "Colors",
+                };
+                mvaddstr(y, 15, label);
+                sb_clear();
+                match r {
+                    0 => sb_str(if FIRST_INDENT { "On" } else { "Off" }),
+                    1 => {
+                        sb_num(INDENT as u32);
+                        sb_str(" spaces");
+                    }
+                    2 => sb_str(if PARA_SPACE { "On" } else { "Off" }),
+                    3 => sb_str(if SHOW_BREAKS { "On" } else { "Off" }),
+                    4 => {
+                        sb_num(PAGE_LINES);
+                        sb_str(" lines");
+                    }
+                    5 => sb_str(if TYPEWRITER { "On" } else { "Off" }),
+                    6 => sb_str(if AUTOSAVE { "On" } else { "Off" }),
+                    7 => {
+                        sb_num(GOAL);
+                        sb_str(" words");
+                    }
+                    _ => sb_str(theme_name(THEME)),
+                }
+                mvaddstr(y, 45, "<");
+                mvaddstr(y, 47 + (18 - SBLEN as i32) / 2, sb());
+                mvaddstr(y, 66, ">");
+            }
+            attrset(P_DLG);
+            mvaddstr(15, 14, "Up/Down choose, Left/Right or Space change.");
+            mvaddstr(16, 14, "Changes apply at once and are saved for next time.");
+            button(18, 35, "  ~C~lose  ", true);
+            curs_set(false);
+            refresh();
+            let k = getch();
+            let mut d: i32 = 0;
+            match k {
+                KEY_ESC | KEY_ENTER => break,
+                99 | 67 => break,
+                KEY_UP => sel = if sel == 0 { n - 1 } else { sel - 1 },
+                KEY_DOWN => sel = (sel + 1) % n,
+                KEY_LEFT => d = -1,
+                KEY_RIGHT | 32 => d = 1,
+                _ => {}
+            }
+            if d != 0 {
+                match sel {
+                    0 => {
+                        FIRST_INDENT = !FIRST_INDENT;
+                        full_layout();
+                    }
+                    1 => {
+                        let v = INDENT as i32 + d;
+                        INDENT = if v < 1 { 1 } else if v > 8 { 8 } else { v as usize };
+                        full_layout();
+                    }
+                    2 => {
+                        PARA_SPACE = !PARA_SPACE;
+                        full_layout();
+                    }
+                    3 => SHOW_BREAKS = !SHOW_BREAKS,
+                    4 => {
+                        let v = PAGE_LINES as i32 + 5 * d;
+                        PAGE_LINES = if v < 20 { 20 } else if v > 80 { 80 } else { v as u32 };
+                    }
+                    5 => TYPEWRITER = !TYPEWRITER,
+                    6 => AUTOSAVE = !AUTOSAVE,
+                    7 => {
+                        let v = GOAL as i32 + 250 * d;
+                        GOAL = if v < 250 { 250 } else if v > 20000 { 20000 } else { v as u32 };
+                    }
+                    _ => {
+                        THEME = ((THEME as i32 + d + NTHEMES as i32) % NTHEMES as i32) as u32;
+                        apply_theme(THEME);
+                    }
+                }
+            }
+        }
+        save_options();
+        set_msg("Settings saved");
     }
 }
 
@@ -2892,7 +3327,7 @@ fn replace_all() {
                 }
             }
             if ok {
-                let st = STYLE[i] & 7;
+                let st = STYLE[i] & S_ALL;
                 for k in 0..rl {
                     rs[k] = st;
                 }
@@ -3149,6 +3584,7 @@ fn insert_scene_break() {
         }
         insert_str("* * *", 0);
         let q2 = para_end(CUR);
+        log_style(q2, 1);
         STYLE[q2] = K_SCENE | (AL_CENTER << 4);
         relayout(para_start(q2), q2, 0);
         new_paragraph();
@@ -3165,10 +3601,13 @@ fn help() {
     sb_clear(); sb_str("          Ctrl+PgUp/PgDn previous/next chapter"); list_add(0);
     sb_clear(); sb_str("SEARCH    Ctrl+F find  F3 next  Ctrl+H replace  Ctrl+G page"); list_add(0);
     sb_clear(); sb_str("TEXT      Ctrl+B bold  Ctrl+I italic  Ctrl+U underline"); list_add(0);
-    sb_clear(); sb_str("          Ctrl+P plain (on a selection or for new text)"); list_add(0);
+    sb_clear(); sb_str("          Ctrl+T strikethrough  Ctrl+K highlight  Ctrl+P plain"); list_add(0);
+    sb_clear(); sb_str("          (on a selection or for new text); Format > Change case"); list_add(0);
     sb_clear(); sb_str("ALIGN     Ctrl+L left  Ctrl+E center  Ctrl+R right  Ctrl+J just."); list_add(0);
     sb_clear(); sb_str("STYLE     Alt+1 normal  Alt+2 chapter  Alt+3 section"); list_add(0);
     sb_clear(); sb_str("          Alt+4 quote   Alt+5 scene    Alt+6 writer's note"); list_add(0);
+    sb_clear(); sb_str("          Alt+7 bullet list  Alt+8 numbered list"); list_add(0);
+    sb_clear(); sb_str("SETTINGS  F8: indent, paragraph spacing, pages, goal, colors"); list_add(0);
     sb_clear(); sb_str("BOOK      F5 outline  F9 statistics  F7 focus mode"); list_add(0);
     sb_clear(); list_add(0);
     sb_clear(); sb_str("Writer's notes are kept in the document but left out of the"); list_add(0);
@@ -3209,6 +3648,13 @@ fn command(c: u32) -> bool {
             21 => find_next(),
             22 => replace_all(),
             23 => goto_page(),
+            26 => change_case(0),
+            27 => change_case(1),
+            28 => change_case(2),
+            38 => toggle_style(S_STRIKE),
+            39 => toggle_style(S_MARK),
+            46 => set_kind(K_BULLET),
+            47 => set_kind(K_NUMBER),
             30 => toggle_style(S_BOLD),
             31 => toggle_style(S_ITALIC),
             32 => toggle_style(S_UNDER),
@@ -3224,26 +3670,45 @@ fn command(c: u32) -> bool {
             44 => set_kind(K_SCENE),
             45 => set_kind(K_NOTE),
             50 => FOCUS = !FOCUS,
-            51 => SHOW_BREAKS = !SHOW_BREAKS,
-            52 => TYPEWRITER = !TYPEWRITER,
+            51 => {
+                SHOW_BREAKS = !SHOW_BREAKS;
+                save_options();
+            }
+            52 => {
+                TYPEWRITER = !TYPEWRITER;
+                save_options();
+            }
             60 => outline(),
             61 => statistics(),
             62 => word_goal(),
             63 => next_chapter(1),
             64 => next_chapter(-1),
             65 => insert_scene_break(),
-            70 => choose_colors(),
+            70 => {
+                choose_colors();
+                save_options();
+            }
             71 => {
                 FIRST_INDENT = !FIRST_INDENT;
                 full_layout();
+                save_options();
             }
-            72 => AUTOSAVE = !AUTOSAVE,
+            72 => {
+                AUTOSAVE = !AUTOSAVE;
+                save_options();
+            }
             73 => {
                 page_length();
+                save_options();
             }
-            74 => save_options(),
+            75 => settings_dialog(),
+            76 => {
+                PARA_SPACE = !PARA_SPACE;
+                full_layout();
+                save_options();
+            }
             80 => help(),
-            81 => alert("About R++ Write", "R++ Write 2.0 - a word processor for books,", "written in R++ with Rustland R++ on rusty486."),
+            81 => alert("About R++ Write", "R++ Write 2.1 - a word processor for books,", "written in R++ with Rustland R++ on rusty486."),
             _ => {}
         }
         false
@@ -3268,7 +3733,7 @@ fn begin_move() {
 fn pick_style() {
     unsafe {
         if CUR > 0 && TEXT[CUR - 1] != b'\n' {
-            TYPING = STYLE[CUR - 1] & 7;
+            TYPING = STYLE[CUR - 1] & S_ALL;
         }
     }
 }
@@ -3284,7 +3749,16 @@ fn move_vert(d: i32) {
         if t >= NLINES as i32 {
             t = NLINES as i32 - 1;
         }
-        let t = t as usize;
+        let mut t = t as usize;
+        while LFL[t] & 4 != 0 {
+            if d < 0 && t > 0 {
+                t -= 1;
+            } else if t + 1 < NLINES {
+                t += 1;
+            } else {
+                break;
+            }
+        }
         // Keep the screen column when moving between lines.
         let n = LLEN[t] as usize;
         let mut col: usize = 0;
@@ -3342,6 +3816,8 @@ fn handle(k: i32) -> bool {
                 0x05 => command(43),
                 0x06 => command(44),
                 0x07 => command(45),
+                0x08 => command(46),
+                0x09 => command(47),
                 _ => false,
             };
         }
@@ -3355,12 +3831,14 @@ fn handle(k: i32) -> bool {
             8 => 22,
             9 => 31,
             10 => 37,
+            11 => 39,
             12 => 34,
             14 => 1,
             15 => 2,
             16 => 33,
             18 => 36,
             19 => 3,
+            20 => 38,
             21 => 32,
             22 => 13,
             24 => 11,
@@ -3370,6 +3848,7 @@ fn handle(k: i32) -> bool {
             KEY_F3 => 21,
             KEY_F5 => 60,
             KEY_F7 => 50,
+            0x142 => 75,
             KEY_F9 => 61,
             0x349 => 64,
             0x351 => 63,
@@ -3482,7 +3961,7 @@ fn welcome() {
         insert_str("Chapter One", 0);
         new_paragraph();
         set_align(AL_JUSTIFY);
-        insert_str("Welcome to R++ Write 2.0, a word processor for writing books. Press F10 or Alt with a highlighted letter to open the menus, and F1 for the keys. Text can be ", 0);
+        insert_str("Welcome to R++ Write 2.1, a word processor for writing books. Press F10 or Alt with a highlighted letter to open the menus, and F1 for the keys. Text can be ", 0);
         insert_str("bold", S_BOLD);
         insert_str(", ", 0);
         insert_str("italic", S_ITALIC);
@@ -3500,11 +3979,23 @@ fn welcome() {
         insert_str("Writer's note: notes stay out of the word count and the export.", 0);
         insert_scene_break();
         set_align(AL_JUSTIFY);
-        insert_str("Choose colors under Options, and save documents with Ctrl+S.", 0);
+        insert_str("F8 opens the settings: first-line indent, space between paragraphs, page length and colors. Lists:", 0);
+        new_paragraph();
+        set_kind(K_BULLET);
+        insert_str("Bullet lists (Alt+7) and numbered lists (Alt+8)", 0);
+        new_paragraph();
+        set_kind(K_BULLET);
+        insert_str("Strikethrough (Ctrl+T) and ", 0);
+        insert_str("highlighting", S_MARK);
+        insert_str(" (Ctrl+K)", 0);
+        new_paragraph();
+        set_kind(K_NORMAL);
+        set_align(AL_JUSTIFY);
+        insert_str("Save documents with Ctrl+S.", 0);
         CUR = 0;
         DIRTY = false;
         EDITS = 0;
-        UNDO_COUNT = 0;
+        undo_clear();
         SESSION_BASE = WORDS;
         set_fname("UNTITLED.WP");
         NAMED = false;
@@ -3515,7 +4006,6 @@ fn main() {
     set_video_mode(3);
     load_options();
     unsafe { apply_theme(THEME); }
-    undo_init();
     let a = args();
     if a.len() > 0 {
         welcome();

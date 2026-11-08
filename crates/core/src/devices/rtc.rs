@@ -20,8 +20,14 @@ impl Default for Rtc {
         ram[0x14] = 0x05; // equipment: floppy, colour 80x25
         ram[0x15] = 0x80; // 640 KB base memory
         ram[0x16] = 0x02;
-        ram[0x17] = 0x00; // 15360 KB extended
-        ram[0x18] = 0x3C;
+        // Extended memory above 1 MB in KB (at most 65535), and 64 KB blocks
+        // above 16 MB (what INT 15h AX=E801h reports).
+        let ext_kb = (crate::machine::RAM_SIZE / 1024 - 1024).min(0xFFFF) as u16;
+        let blocks = (crate::machine::RAM_SIZE.saturating_sub(16 << 20) >> 16) as u16;
+        for (lo, hi, v) in [(0x17, 0x18, ext_kb), (0x30, 0x31, ext_kb), (0x34, 0x35, blocks)] {
+            ram[lo] = v as u8;
+            ram[hi] = (v >> 8) as u8;
+        }
         // 2026-01-01 00:00:00 until the frontend sets the time.
         Rtc { index: 0, ram, base_secs: 1_767_225_600, base_cycle: 0 }
     }

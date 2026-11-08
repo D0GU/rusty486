@@ -15,7 +15,8 @@ use crate::devices::pit::Pit;
 use crate::devices::rtc::Rtc;
 use crate::devices::video::{self, Video};
 
-pub const RAM_SIZE: usize = 16 * 1024 * 1024;
+/// 128 MB: the practical ceiling of a 486 PC of the time.
+pub const RAM_SIZE: usize = 128 * 1024 * 1024;
 pub const BIOS_SIZE: usize = 64 * 1024;
 const BIOS_BASE: u32 = 0xF0000;
 /// The BIOS is also visible at the top of the 4 GB address space.

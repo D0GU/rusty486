@@ -201,6 +201,17 @@ start:
 
         mov si, banner
         call print
+        ; Memory: 16 MB + 64 KB blocks above it (CMOS 34h/35h).
+        mov al, 0x35
+        call cmos_read
+        mov ah, al
+        mov al, 0x34
+        out 0x70, al
+        in al, 0x71
+        movzx eax, ax
+        shl eax, 6
+        add eax, 16384
+        call print_dec
         mov si, msg_mem
         call print
 
@@ -224,9 +235,37 @@ print:
         pop ax
         ret
 
+; Print EAX in decimal.
+print_dec:
+        push eax
+        push ebx
+        push cx
+        push edx
+        mov ebx, 10
+        xor cx, cx
+.d:     xor edx, edx
+        div ebx
+        push dx
+        inc cx
+        test eax, eax
+        jnz .d
+.o:     pop ax
+        add al, '0'
+        mov ah, 0x0E
+        push bx
+        mov bx, 0x0007
+        int 0x10
+        pop bx
+        loop .o
+        pop edx
+        pop cx
+        pop ebx
+        pop eax
+        ret
+
 banner  db 'rusty486 BIOS v0.1', 13, 10
         db 'Intel 486SX-compatible CPU @ 33 MHz', 13, 10, 0
-msg_mem db '16384 KB RAM OK', 13, 10, 13, 10, 0
+msg_mem db ' KB RAM OK', 13, 10, 13, 10, 0
 
 dummy_iret:
         iret
@@ -1210,6 +1249,8 @@ int15:
         sti
         cmp ah, 0x88
         je .extmem
+        cmp ax, 0xE801
+        je .e801
         cmp ah, 0x86
         je .wait
         cmp ax, 0x2400
@@ -1224,7 +1265,27 @@ int15:
         stc
         retf 2
 .extmem:
-        mov ax, 15360                   ; KB above 1 MB (16 MB total)
+        ; KB above 1 MB from CMOS 30h/31h (at most 64 MB - 1 MB).
+        mov al, 0x31
+        call cmos_read
+        mov ah, al
+        mov al, 0x30
+        out 0x70, al
+        in al, 0x71
+        clc
+        retf 2
+.e801:
+        ; AX = CX = KB between 1 and 16 MB, BX = DX = 64 KB blocks above 16 MB.
+        mov al, 0x35
+        call cmos_read
+        mov ah, al
+        mov al, 0x34
+        out 0x70, al
+        in al, 0x71
+        mov bx, ax
+        mov dx, ax
+        mov ax, 15360
+        mov cx, ax
         clc
         retf 2
 ; AH=86h: wait CX:DX microseconds (to the nearest 55 ms timer tick).

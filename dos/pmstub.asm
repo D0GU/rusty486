@@ -19,7 +19,7 @@
 ; CPU exceptions print a message and exit with code 255.
 ;
 ; Payload header: 'R486', load address, image size, BSS size, entry, stack top,
-; heap end (0 = HEAP_END), reserved.
+; heap end (0 = the top of RAM), reserved.
 ; =============================================================================
 
         bits 16
@@ -160,7 +160,7 @@ start:
         mov eax, [payload_hdr+24]
         test eax, eax
         jnz .heap
-        mov eax, HEAP_END
+        call memory_top
 .heap:  mov [systab+28], eax
 
         ; Into 32-bit protected mode.
@@ -174,6 +174,30 @@ start:
 pm_start_ptr:
         dd 0
         dw SEL_CODE32
+
+; EAX = the end of RAM: INT 15h E801h (or 88h), else HEAP_END.
+memory_top:
+        mov ax, 0xE801
+        int 0x15
+        jc .old
+        movzx eax, bx
+        test eax, eax
+        jz .low
+        shl eax, 16
+        add eax, 0x1000000
+        ret
+.low:   movzx eax, ax
+        jmp .kb
+.old:   mov ah, 0x88
+        int 0x15
+        jc .default
+        movzx eax, ax
+.kb:    shl eax, 10
+        add eax, 0x100000
+        ret
+.default:
+        mov eax, HEAP_END
+        ret
 
 ; Read CX bytes into DS:DX from the program file. CF on error.
 read_file:

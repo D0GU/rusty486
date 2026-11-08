@@ -1790,6 +1790,15 @@ impl Gen {
 
     fn if_expr(&mut self, c: &Expr, then: &Block, els: Option<&Expr>, want: Option<&Ty>) -> R<Ty> {
         let else_l = self.asm.label();
+        // `if c { 0 } else { n - 1 }`: a bare literal takes the else branch's type.
+        let hint = match (want, &then.tail, els) {
+            (None, Some(t), Some(e)) if then.stmts.is_empty() && is_untyped_lit(t) => match self.probe(e) {
+                Some(ty @ Ty::Int(_)) => Some(ty),
+                _ => None,
+            },
+            _ => None,
+        };
+        let want = want.or(hint.as_ref());
         self.expr_as(c, &Ty::Bool)?;
         self.asm.test_rr(EAX, EAX);
         self.asm.jcc(Cc::E, else_l);
