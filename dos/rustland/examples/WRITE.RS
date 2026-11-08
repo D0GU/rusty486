@@ -1727,7 +1727,6 @@ fn draw_screen() {
         let col = CUR - LSTART[li] as usize;
         mv(ty + row_of(li) as i32, PX + line_x(li, col) as i32);
         curs_set(true);
-        refresh();
     }
 }
 
@@ -4030,6 +4029,7 @@ fn main() {
     }
     loop {
         draw();
+        refresh();
         let mut quit = handle(getch());
         // Handle keys typed while drawing before the next redraw.
         while !quit && key_pressed() {

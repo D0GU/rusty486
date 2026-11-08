@@ -1100,12 +1100,17 @@ fn draw_screen() {
         let x = col_x(r, CUR);
         mv(1 + (r - TOP) as i32, gutter() as i32 + (x as i32 - LEFT as i32));
         curs_set(true);
-        let mut rr = Regs::new();
-        rr.eax = 0x0100;
-        rr.ecx = if OVERWRITE { 0x0007 } else { 0x0607 };
-        refresh();
-        dos_int(0x10, &mut rr);
     }
+}
+
+// Show the editor: draw() only builds the screen, so a dialog drawn over
+// it is shown in one go, without the editor flashing through.
+fn show_editor() {
+    refresh();
+    let mut rr = Regs::new();
+    rr.eax = 0x0100;
+    rr.ecx = if unsafe { OVERWRITE } { 0x0007 } else { 0x0607 };
+    dos_int(0x10, &mut rr);
 }
 
 // ----------------------------------------------------- menus
@@ -2875,6 +2880,7 @@ fn main() {
     }
     loop {
         draw();
+        show_editor();
         let mut quit = handle(getch());
         while !quit && key_pressed() {
             quit = handle(getch());
