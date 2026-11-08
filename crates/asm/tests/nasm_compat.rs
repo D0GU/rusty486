@@ -7,7 +7,8 @@ use std::process::Command;
 fn nasm(src: &Path, name: &str) -> Option<Vec<u8>> {
     let out: PathBuf = std::env::temp_dir().join(format!("rusty486-asm-{name}.bin"));
     let nasm = std::env::var("NASM").unwrap_or_else(|_| "nasm".into());
-    let status = Command::new(nasm).args(["-f", "bin", "-o"]).arg(&out).arg(src).status().ok()?;
+    let inc = format!("-i{}/", src.parent().unwrap().display());
+    let status = Command::new(nasm).arg(inc).args(["-f", "bin", "-o"]).arg(&out).arg(src).status().ok()?;
     assert!(status.success(), "NASM rejected {}", src.display());
     std::fs::read(out).ok()
 }
@@ -18,7 +19,9 @@ fn compare(path: &Path, name: &str) {
         return;
     };
     let src = std::fs::read_to_string(path).unwrap();
-    let out = match rusty486_asm::assemble(&src) {
+    let dir = path.parent().unwrap().to_path_buf();
+    let resolver = |n: &str| std::fs::read_to_string(dir.join(n)).ok();
+    let out = match rusty486_asm::assemble_with(&src, &resolver) {
         Ok(o) => o,
         Err(errs) => {
             let lines: Vec<&str> = src.lines().collect();

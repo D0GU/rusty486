@@ -86,6 +86,10 @@ impl Bus for PcBus {
         let addr = self.map(addr);
         if (BIOS_BASE..BIOS_BASE + BIOS_SIZE as u32).contains(&addr) {
             self.bios[(addr - BIOS_BASE) as usize]
+        } else if (0xA0000..0xB0000).contains(&addr) && self.video.graphics() {
+            self.video.vram[self.video.window_offset(addr)]
+        } else if (video::LFB_BASE..video::LFB_BASE + video::VRAM_SIZE as u32).contains(&addr) {
+            self.video.vram[(addr - video::LFB_BASE) as usize]
         } else if addr >= BIOS_HIGH {
             self.bios[(addr - BIOS_HIGH) as usize]
         } else {
@@ -98,9 +102,34 @@ impl Bus for PcBus {
         if (BIOS_BASE..BIOS_BASE + BIOS_SIZE as u32).contains(&addr) {
             return; // ROM
         }
+        if (0xA0000..0xB0000).contains(&addr) && self.video.graphics() {
+            let o = self.video.window_offset(addr);
+            self.video.vram[o] = value;
+            return;
+        }
+        if (video::LFB_BASE..video::LFB_BASE + video::VRAM_SIZE as u32).contains(&addr) {
+            self.video.vram[(addr - video::LFB_BASE) as usize] = value;
+            return;
+        }
         if let Some(b) = self.ram.get_mut(addr as usize) {
             *b = value;
         }
+    }
+
+    fn io_read16(&mut self, port: u16) -> u16 {
+        if port == 0x1CE || port == 0x1CF {
+            return self.video.read16(port);
+        }
+        u16::from_le_bytes([self.io_read8(port), self.io_read8(port.wrapping_add(1))])
+    }
+
+    fn io_write16(&mut self, port: u16, value: u16) {
+        if port == 0x1CE || port == 0x1CF {
+            return self.video.write16(port, value);
+        }
+        let [a, b] = value.to_le_bytes();
+        self.io_write8(port, a);
+        self.io_write8(port.wrapping_add(1), b);
     }
 
     fn io_read8(&mut self, port: u16) -> u8 {
@@ -110,7 +139,7 @@ impl Bus for PcBus {
             p if Pit::handles(p) => self.pit.read(p),
             p if Rtc::handles(p) => self.rtc.read(p, self.now, self.clock_hz),
             p if Input::handles(p) => self.input.read(p),
-            p if Video::handles(p) => self.video.read(p),
+            p if Video::handles(p) => self.video.read(p, self.now, self.clock_hz),
             p if (disk::BASE_PORT..disk::BASE_PORT + 0x20).contains(&p) => self.disk.read(p),
             _ => 0xFF,
         }

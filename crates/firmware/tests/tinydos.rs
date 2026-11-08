@@ -194,6 +194,80 @@ fn sees_files_added_by_the_host() {
 }
 
 #[test]
+fn graphics_mode_13h_and_vbe() {
+    let gfx = asm(r#"
+        org 0x100
+        mov ax, 0x0013
+        int 0x10
+        push word 0xA000
+        pop es
+        xor di, di
+        xor dx, dx              ; y
+.y:     xor cx, cx              ; x
+.x:     mov ax, cx
+        add ax, dx
+        stosb
+        inc cx
+        cmp cx, 320
+        jb .x
+        inc dx
+        cmp dx, 200
+        jb .y
+        mov ax, 0x0E41          ; text in graphics mode
+        mov bx, 0x000F
+        int 0x10
+        ; VBE controller info
+        push ds
+        pop es
+        mov di, vbeinfo
+        mov ax, 0x4F00
+        int 0x10
+        cmp ax, 0x004F
+        jne .fail
+        cmp dword [vbeinfo], 'VESA'
+        jne .fail
+        mov dx, okmsg
+        mov ah, 9
+        int 0x21
+        mov ax, 0x4C00
+        int 0x21
+.fail:  mov ax, 0x4C01
+        int 0x21
+okmsg   db 'VESA ok$'
+vbeinfo times 512 db 0
+    "#);
+    let vbe = asm(r#"
+        org 0x100
+        mov ax, 0x4F02
+        mov bx, 0x0101          ; 640x480x256, banked
+        int 0x10
+        mov ax, 0x4F05
+        xor bx, bx
+        mov dx, 4               ; bank 4 (64 KB units)
+        int 0x10
+        push word 0xA000
+        pop es
+        mov byte [es:0x0010], 0x55
+        mov ax, 0x4C00
+        int 0x21
+    "#);
+    let mut pc = Pc::boot(&[("GFX.COM", &gfx), ("VBE.COM", &vbe)]);
+    pc.type_line("GFX");
+    let v = &pc.m.bus.video;
+    assert!(v.graphics(), "mode 13h not active");
+    assert_eq!((v.xres, v.yres, v.bpp), (320, 200, 8));
+    assert_eq!(v.vram[10 * 320 + 20], 30);
+    // The 'A' glyph was drawn in colour 15 somewhere in the first cell.
+    assert!((0..8).any(|y| (0..8).any(|x| v.vram[y * 320 + x] == 15)), "no text pixels");
+    let log = String::from_utf8_lossy(&pc.m.bus.debug_out).into_owned();
+    assert!(log.contains("VESA ok"), "debug log: {log}");
+    pc.type_line("VBE");
+    let v = &pc.m.bus.video;
+    assert_eq!((v.xres, v.yres, v.bpp), (640, 480, 8));
+    assert_eq!(v.vram[4 * 65536 + 0x10], 0x55);
+}
+
+#[test]
 fn autoexec_runs() {
     let pc = Pc::boot(&[("AUTOEXEC.BAT", b"@ECHO OFF\r\nECHO Autoexec says hi\r\n")]);
     pc.expect("Autoexec says hi");

@@ -18,6 +18,9 @@ const PALETTE: [u32; 16] = [
 pub struct Screen {
     glyphs: Vec<[u8; 8]>,
     pub pixels: Vec<u32>,
+    /// Current frame size (640x400 for text, the mode size for graphics).
+    pub width: u32,
+    pub height: u32,
 }
 
 impl Screen {
@@ -25,13 +28,24 @@ impl Screen {
         Screen {
             glyphs: font::cp437(),
             pixels: vec![0; (SCREEN_W * SCREEN_H) as usize],
+            width: SCREEN_W,
+            height: SCREEN_H,
         }
     }
 
-    /// Draw the machine's 80x25 text buffer. `blink_on` drives cursor and
-    /// attribute blink.
+    /// Draw the machine's display: graphics modes from VRAM, otherwise the
+    /// 80x25 text buffer. `blink_on` drives cursor and attribute blink.
     pub fn render(&mut self, machine: &Machine, blink_on: bool) {
         let video = &machine.bus.video;
+        if video.graphics() {
+            let (w, h) = video.render_graphics(&mut self.pixels);
+            for p in &mut self.pixels {
+                *p |= 0xFF00_0000;
+            }
+            self.width = w as u32;
+            self.height = h as u32;
+            return;
+        }
         let cursor = video
             .cursor_visible()
             .then(|| (video.cursor_offset() as usize, video.cursor_shape()));
@@ -49,6 +63,9 @@ impl Screen {
         blink_attrs: bool,
     ) {
         let (cursor, (cur_start, cur_end)) = cursor.unwrap_or((usize::MAX, (0, 0)));
+        self.width = SCREEN_W;
+        self.height = SCREEN_H;
+        self.pixels.resize((SCREEN_W * SCREEN_H) as usize, 0);
         for row in 0..TEXT_ROWS {
             for col in 0..TEXT_COLS {
                 let i = row * TEXT_COLS + col;
@@ -93,7 +110,7 @@ impl Screen {
             .collect();
         let mut out = Vec::new();
         {
-            let mut enc = png::Encoder::new(&mut out, SCREEN_W, SCREEN_H);
+            let mut enc = png::Encoder::new(&mut out, self.width, self.height);
             enc.set_color(png::ColorType::Rgb);
             enc.set_depth(png::BitDepth::Eight);
             let mut w = enc.write_header().expect("PNG header");

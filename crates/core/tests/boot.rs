@@ -17,6 +17,7 @@ fn assemble(src: &str, test: &str) -> Option<Vec<u8>> {
     let out: PathBuf = std::env::temp_dir().join(format!("rusty486-{test}-{out_name}.bin"));
     let nasm = std::env::var("NASM").unwrap_or_else(|_| "nasm".into());
     let status = Command::new(nasm)
+        .arg(format!("-i{}/", root.display()))
         .args(["-f", "bin", "-o"])
         .arg(&out)
         .arg(root.join(src))

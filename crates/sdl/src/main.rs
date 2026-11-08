@@ -137,6 +137,7 @@ fn run(args: Args) -> Result<(), String> {
     // Text mode pixels are taller than wide: show 640x400 at 4:3.
     canvas.set_logical_size(VIEW_W, VIEW_H).map_err(|e| e.to_string())?;
     let creator = canvas.texture_creator();
+    let mut tex_size = (SCREEN_W, SCREEN_H);
     let mut texture = creator
         .create_texture_streaming(PixelFormatEnum::ARGB8888, SCREEN_W, SCREEN_H)
         .map_err(|e| e.to_string())?;
@@ -254,8 +255,15 @@ fn run(args: Args) -> Result<(), String> {
 
         emu.blink_on = (start.elapsed().as_millis() / 266) % 2 == 0;
         emu.render(emu.view);
+        let size = (emu.screen.width, emu.screen.height);
+        if size != tex_size {
+            texture = creator
+                .create_texture_streaming(PixelFormatEnum::ARGB8888, size.0, size.1)
+                .map_err(|e| e.to_string())?;
+            tex_size = size;
+        }
         texture
-            .update(None, emu.screen.bytes(), (SCREEN_W * 4) as usize)
+            .update(None, emu.screen.bytes(), (size.0 * 4) as usize)
             .map_err(|e| e.to_string())?;
         canvas.clear();
         canvas.copy(&texture, None, Rect::new(0, 0, VIEW_W, VIEW_H))?;

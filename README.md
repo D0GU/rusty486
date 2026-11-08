@@ -49,6 +49,11 @@ faults). Passes the complete [test386.asm](https://github.com/barotto/test386.as
 ROM (fetch it with `scripts/fetch-test386.ps1`), including its arithmetic
 reference output. Not emulated: hardware task switching.
 
+**Milestone 7, done:** graphics. Mode 13h (320x200x256) and VESA VBE 2.0
+modes up to 640x480 at 8/15/16/32 bpp (banked window at A0000h and a linear
+framebuffer at E0000000h), a 256-colour DAC, retrace status at 3DAh, BIOS
+pixel/palette/font services and text drawing in mode 13h.
+
 ## Roadmap
 
 1. ~~Real-mode boot to text~~
@@ -57,7 +62,7 @@ reference output. Not emulated: hardware task switching.
 4. ~~Interrupts, timer, RTC, keyboard and mouse~~
 5. ~~TinyDOS~~
 6. ~~Protected mode and paging~~
-7. VBE graphics
+7. ~~VBE graphics~~
 8. OPL2 + Sound Blaster + PC speaker
 9. Sprite, map, sound and disk editors
 10. A Borland-style IDE and compiler for a Rust subset, running inside TinyDOS

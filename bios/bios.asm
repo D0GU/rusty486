@@ -54,6 +54,7 @@
 %define BDA_MIDNIGHT 0x70
 %define BDA_KBSTART  0x80
 %define BDA_KBEND    0x82
+%define VBE_MODE     0x4F0          ; current VBE mode (word)
 %define BDA_DISKST   0x41           ; last floppy status
 %define BDA_MODE     0x49
 %define BDA_COLS     0x4A
@@ -400,6 +401,16 @@ int10:
         je v_getmode
         cmp ah, 0x13
         je v_writestring
+        cmp ah, 0x0C
+        je v_putpixel
+        cmp ah, 0x0D
+        je v_getpixel
+        cmp ah, 0x10
+        je v_palette
+        cmp ah, 0x11
+        je v_fontinfo
+        cmp ah, 0x4F
+        je v_vbe
         iret
 
 ; AH=00h set video mode (AL bit 7 = don't clear). Only text mode 3 for now.
@@ -414,6 +425,14 @@ v_setmode:
         mov ah, al
         and al, 0x7F
         mov [BDA_MODE], al
+        mov word [BDA_CURPOS], 0
+        cmp al, 0x13
+        jne .text
+        call set_mode13
+        jmp .done
+.text:  mov byte [BDA_MODE], 3
+        mov word [VBE_MODE], 3
+        call dispi_off
         mov word [BDA_COLS], 80
         mov word [BDA_PAGESZ], 4000
         mov byte [BDA_ROWS], 24
@@ -430,7 +449,7 @@ v_setmode:
         mov cx, 0x0E0F
         call set_cursor_shape
         call update_cursor
-        pop dx
+.done:  pop dx
         pop cx
         pop bx
         pop ax
@@ -536,9 +555,15 @@ v_writechar:
 v_teletype:
         push ds
         push bx
+        push ax
+        mov ax, BDA
+        mov ds, ax
+        pop ax
+        cmp byte [BDA_MODE], 0x13       ; graphics: BL is the colour
+        je .put
         call cursor_addr
-        mov bl, [bx+1]                  ; existing attribute
-        call put_char
+        mov bl, [bx+1]                  ; text: keep the cell's attribute
+.put:   call put_char
         pop bx
         pop ds
         iret
@@ -549,7 +574,7 @@ v_getmode:
         mov ax, BDA
         mov ds, ax
         mov al, [BDA_MODE]
-        mov ah, 80
+        mov ah, [BDA_COLS]
         xor bh, bh
         pop ds
         iret
@@ -627,15 +652,21 @@ put_char:
         je .lf
         cmp al, 13
         je .cr
-        ; printable: store char + attribute
-        mov cl, bl                      ; attribute (CX is saved above)
+        ; printable
+        cmp byte [BDA_MODE], 0xFF
+        je .done                        ; VBE graphics: no BIOS text
+        cmp byte [BDA_MODE], 0x13
+        jne .text
+        call gfx_char                   ; mode 13h: draw the glyph in colour BL
+        jmp .adv
+.text:  mov cl, bl                      ; attribute (CX is saved above)
         call cursor_addr                ; DS:BX -> cell
         mov ah, cl
         mov [bx], ax
         mov ax, BDA
         mov ds, ax
-        inc dl
-        cmp dl, 80
+.adv:   inc dl
+        cmp dl, [BDA_COLS]
         jb .save
         xor dl, dl
         jmp .lf
@@ -649,6 +680,11 @@ put_char:
         cmp dh, 25
         jb .save
         mov dh, 24
+        cmp byte [BDA_MODE], 0x13
+        jne .tscroll
+        call gfx_scroll
+        jmp .save
+.tscroll:
         push dx
         mov ax, 0x0601                  ; scroll up one line
         mov bh, 0x07
@@ -850,6 +886,8 @@ cell_offset:
         shl ax, 1
         pop bx
         ret
+
+%include "video.asm"
 
 ; =============================================================================
 ; INT 11h / 12h - equipment and memory size
