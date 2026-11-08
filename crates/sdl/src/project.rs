@@ -266,6 +266,7 @@ const RPP_EXAMPLES: &[(&str, &[u8])] = &[
     ("RPP/SHAPES.RS", include_bytes!("../../../dos/rustland/examples/SHAPES.RS")),
     ("RPP/PLASMA.RS", include_bytes!("../../../dos/rustland/examples/PLASMA.RS")),
     ("RPP/SNAKE.RS", include_bytes!("../../../dos/rustland/examples/SNAKE.RS")),
+    ("RPP/WRITE.RS", include_bytes!("../../../dos/rustland/examples/WRITE.RS")),
 ];
 
 /// Put the current RUSTLAND.EXE in C:\ and the examples in C:\RPP.

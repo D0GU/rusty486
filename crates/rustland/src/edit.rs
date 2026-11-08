@@ -8,6 +8,7 @@ use crate::scr::{self, Screen};
 
 pub const TAB: usize = 4;
 const UNDO_DEPTH: usize = 40;
+const UNDO_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Pos {
@@ -22,8 +23,9 @@ enum LastEdit {
     Deleting,
 }
 
+/// The whole text as one block (lines joined with '\n').
 struct Snapshot {
-    lines: Vec<Vec<u8>>,
+    text: Vec<u8>,
     cur: Pos,
 }
 
@@ -130,10 +132,19 @@ impl Editor {
         if kind != LastEdit::None && kind == self.last {
             return;
         }
-        if self.undo.len() >= UNDO_DEPTH {
-            self.undo.remove(0);
+        let mut text = Vec::with_capacity(self.lines.iter().map(|l| l.len() + 1).sum());
+        for (i, l) in self.lines.iter().enumerate() {
+            if i > 0 {
+                text.push(b'\n');
+            }
+            text.extend_from_slice(l);
         }
-        self.undo.push(Snapshot { lines: self.lines.clone(), cur: self.cur });
+        // Keep at most UNDO_DEPTH steps and UNDO_BYTES of history.
+        let mut total: usize = self.undo.iter().map(|s| s.text.len()).sum::<usize>() + text.len();
+        while !self.undo.is_empty() && (self.undo.len() >= UNDO_DEPTH || total > UNDO_BYTES) {
+            total -= self.undo.remove(0).text.len();
+        }
+        self.undo.push(Snapshot { text, cur: self.cur });
         self.last = kind;
     }
 
@@ -145,7 +156,7 @@ impl Editor {
     pub fn undo(&mut self) -> bool {
         match self.undo.pop() {
             Some(s) => {
-                self.lines = s.lines;
+                self.lines = s.text.split(|&c| c == b'\n').map(|l| l.to_vec()).collect();
                 self.cur = s.cur;
                 self.anchor = None;
                 self.last = LastEdit::None;
@@ -545,7 +556,7 @@ impl Editor {
     fn comment_state(&self, l: usize) -> bool {
         let mut inside = false;
         for line in &self.lines[..l.min(self.lines.len())] {
-            highlight(line, &mut inside);
+            scan_comments(line, &mut inside);
         }
         inside
     }
@@ -553,6 +564,36 @@ impl Editor {
 
 fn is_word(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Track block comments through a line without colouring it.
+fn scan_comments(line: &[u8], in_comment: &mut bool) {
+    let mut i = 0;
+    let mut in_str = false;
+    while i < line.len() {
+        let c = line[i];
+        let next = line.get(i + 1).copied();
+        if *in_comment {
+            if c == b'*' && next == Some(b'/') {
+                *in_comment = false;
+                i += 1;
+            }
+        } else if in_str {
+            if c == b'\\' {
+                i += 1;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'"' {
+            in_str = true;
+        } else if c == b'/' && next == Some(b'/') {
+            return;
+        } else if c == b'/' && next == Some(b'*') {
+            *in_comment = true;
+            i += 1;
+        }
+        i += 1;
+    }
 }
 
 /// Colours for each byte of a line; `in_comment` carries block comments.

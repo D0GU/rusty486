@@ -101,6 +101,13 @@ unsafe impl GlobalAlloc for Heap {
         let align = (l.align() as u32).max(16);
         let p = (*self.next.get() + align - 1) & !(align - 1);
         if p.checked_add(size).is_none_or(|e| e > *self.end.get()) {
+            for big in c + 1..free.len() {
+                if free[big] != 0 && (free[big] as usize) % l.align() == 0 {
+                    let q = free[big];
+                    free[big] = *(q as *const u32);
+                    return q as *mut u8;
+                }
+            }
             return core::ptr::null_mut();
         }
         *self.next.get() = p + size;

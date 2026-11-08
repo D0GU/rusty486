@@ -19,8 +19,8 @@ $elf = Join-Path $root "crates\rustland\target\i586-unknown-linux-gnu\release\ru
 $exe = Join-Path $root "dos\rustland\RUSTLAND.EXE"
 Push-Location $root
 try {
-    # Heap up to 8 MB: programs run from the IDE load at 8 MB.
-    & $cargo run --quiet --release -p rusty486-lang --bin pmpack -- $elf $exe 800000
+    # Heap up to 12 MB: programs run from the IDE load at 12 MB.
+    & $cargo run --quiet --release -p rusty486-lang --bin pmpack -- $elf $exe C00000
     if ($LASTEXITCODE -ne 0) { throw "pmpack failed" }
 } finally {
     Pop-Location

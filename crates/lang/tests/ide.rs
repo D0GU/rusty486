@@ -60,7 +60,8 @@ fn ide_edits_compiles_and_runs() {
         eprintln!("RUSTLAND.EXE not built; skipping");
         return;
     };
-    let disk = tinydos_floppy("TEST", &[("RUSTLAND.EXE", &ide), ("HELLO.RS", HELLO.as_bytes())]).unwrap();
+    let write = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dos/rustland/examples/WRITE.RS")).unwrap();
+    let disk = tinydos_floppy("TEST", &[("RUSTLAND.EXE", &ide), ("HELLO.RS", HELLO.as_bytes()), ("WRITE.RS", &write)]).unwrap();
     let mut m = Machine::new(BIOS.to_vec());
     m.insert_disk(Drive::A, DiskImage::new(disk));
     let mut pc = Pc { m };
@@ -99,4 +100,12 @@ fn ide_edits_compiles_and_runs() {
     let fs = Fs::open(&mut disk).unwrap();
     assert_eq!(fs.read("HELLO.RS").unwrap(), HELLO.as_bytes());
     assert!(fs.read("HELLO.EXE").is_ok());
+
+    // A 700-line program compiles inside the IDE without running out of memory.
+    pc.typ("RUSTLAND WRITE.RS
+");
+    pc.wait_for("Ctrl-F9", 10_000);
+    pc.key(0x43, 0, ALT);
+    let t = pc.wait_for("Success", 60_000);
+    eprintln!("WRITE.RS compiled in {t} ms");
 }

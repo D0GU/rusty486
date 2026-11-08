@@ -341,7 +341,7 @@ fn example(name: &str) -> String {
 
 #[test]
 fn examples_compile() {
-    for name in ["HELLO.RS", "GUESS.RS", "PRIMES.RS", "SHAPES.RS", "PLASMA.RS", "SNAKE.RS"] {
+    for name in ["HELLO.RS", "GUESS.RS", "PRIMES.RS", "SHAPES.RS", "PLASMA.RS", "SNAKE.RS", "WRITE.RS"] {
         if let Err(e) = rusty486_lang::compile(&example(name)) {
             panic!("{name}: {e}");
         }

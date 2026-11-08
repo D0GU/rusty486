@@ -84,7 +84,7 @@ DOS extender stub (`dos/pmstub.asm`): the stub loads the 32-bit image above
 1 MB, switches to flat protected mode and thunks back to real mode for DOS and
 BIOS calls. The compiler (`crates/lang`, `no_std` + `alloc`) is the same
 crate the host tests use; it emits x86 machine code directly and packs the
-program with the same stub, linked at 8 MB.
+program with the same stub, linked at 12 MB.
 
 - **Editor:** menus (F10/Alt+letter), syntax colours, insert/overwrite,
   Shift+arrow selection, Ctrl+Ins/Shift+Ins/Shift+Del clipboard, undo
@@ -111,6 +111,11 @@ Not supported: generics, traits, closures, tuples, `Option`/`Result`,
 `String`/`Vec`/`Box`, floating point, 64-bit integers, modules, and the borrow
 checker. Programs are therefore "Rust-shaped" rather than full Rust; real rustc
 cannot run on the emulated machine.
+
+`C:\RPP\WRITE.RS` is a word processor (word wrap, justification, bold/italic/
+underline, save/load) built on a small ncurses-style library, written live into
+the IDE over MCP. `cargo run -p rusty486-lang --bin rppc -- FILE.RS` compiles
+R++ on the host.
 
 To rebuild the IDE after changing `crates/rustland` or `crates/lang`:
 

@@ -218,6 +218,12 @@ impl App {
             self.place_cursor();
             let k = rt::read_key();
             self.key(k);
+            // Handle keys typed while we were busy before redrawing, so fast
+            // typing (or pasted input) never overflows the BIOS buffer.
+            while !self.quit && rt::key_waiting() {
+                let k = rt::read_key();
+                self.key(k);
+            }
         }
         rt::set_text_mode();
     }

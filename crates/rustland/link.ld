@@ -1,5 +1,5 @@
 /* Rustland R++ runs flat at 4 MB under the PM stub; the stack follows the
-   BSS, and the heap runs from there to 8 MB (programs it runs load at 8 MB). */
+   BSS, and the heap runs from there to 12 MB (programs it runs load at 12 MB). */
 ENTRY(_start)
 SECTIONS {
   . = 0x400000;
