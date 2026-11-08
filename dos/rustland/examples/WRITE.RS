@@ -1648,7 +1648,22 @@ fn draw_status() {
     }
 }
 
+static mut SB_SAVE: [u8; 256] = [0; 256];
+static mut SB_SAVE_LEN: usize = 0;
+
+// Dialogs pass the string builder's text while draw() uses it for the
+// status bar, so draw() puts it back afterwards.
 fn draw() {
+    unsafe {
+        copy_bytes(SB_SAVE.as_mut_ptr(), SB.as_ptr(), SBLEN);
+        SB_SAVE_LEN = SBLEN;
+        draw_screen();
+        copy_bytes(SB.as_mut_ptr(), SB_SAVE.as_ptr(), SB_SAVE_LEN);
+        SBLEN = SB_SAVE_LEN;
+    }
+}
+
+fn draw_screen() {
     unsafe {
         scroll_to_cursor();
         let ph = text_rows() as i32;

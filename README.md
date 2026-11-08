@@ -121,7 +121,7 @@ cannot run on the emulated machine.
 
 ### R++ Write
 
-**R++ Write 2.0** (`C:\WRITE`, source `C:\RPP\WRITE.RS`) is a word processor for
+**R++ Write 2.1** (`C:\WRITE`, source `C:\RPP\WRITE.RS`) is a word processor for
 writing books, written in R++ on a small ncurses-style library. Type
 `CD \WRITE` and `WRITE SAMPLE` to open the sample book.
 
@@ -152,12 +152,26 @@ writing books, written in R++ on a small ncurses-style library. Type
 (`scripts/make-write-sample.py`). `cargo run -p rusty486-lang --bin rppc --
 FILE.RS` compiles R++ on the host.
 
-To rebuild the IDE and R++ Write after changing `crates/rustland`, `crates/lang`
-or `WRITE.RS`:
+### Text
+
+**Text 1.0** (`C:\TEXT`, source `C:\RPP\TEXT.RS`) is a Notepad-style editor
+for plain text files, in MS-DOS EDIT colours: `TEXT README.TXT`.
+
+- Keeps files exactly as they were: CR LF or LF line ends, tabs, and a
+  missing final newline. Files up to 2 MB.
+- File (New, Open with a file list, Save, Save As), Edit (undo, cut, copy,
+  paste, select all, time/date on F5), Search (find, find next, replace
+  all, go to line) and View (word wrap, line numbers, status bar, tab
+  width; saved in `TEXT.CFG`) menus.
+- Shift selection, word movement, insert/overwrite, a status bar with line,
+  column and line-end type.
+
+To rebuild the IDE, R++ Write and Text after changing `crates/rustland`,
+`crates/lang`, `WRITE.RS` or `TEXT.RS`:
 
 ```powershell
 rustup target add i586-unknown-linux-gnu
-scripts/build-rustland.ps1        # writes RUSTLAND.EXE and dos/write/WRITE.EXE
+scripts/build-rustland.ps1        # writes RUSTLAND.EXE, WRITE.EXE and TEXT.EXE
 ```
 
 The emulator copies the current `RUSTLAND.EXE` to `C:\` on every start and the
@@ -287,6 +301,7 @@ cargo test -p rusty486-lang --release   # R++ programs and the IDE, run under Ti
 | `crates/rustland` | Rustland R++ IDE (bare-metal i586, built separately). |
 | `dos/rustland/` | Built `RUSTLAND.EXE` and the example programs. |
 | `dos/write/` | R++ Write: built `WRITE.EXE`, README and a sample book (installed as `C:\WRITE`). |
+| `dos/text/` | Text: built `TEXT.EXE` and README (installed as `C:\TEXT`). |
 | `dos/` | TinyDOS sources: boot sector, kernel, COMMAND.COM. |
 | `crates/sdl` | Desktop frontend (`rusty486` binary). |
 | `bios/` | BIOS and demo boot sector (NASM). |

@@ -267,6 +267,7 @@ const RPP_EXAMPLES: &[(&str, &[u8])] = &[
     ("RPP/PLASMA.RS", include_bytes!("../../../dos/rustland/examples/PLASMA.RS")),
     ("RPP/SNAKE.RS", include_bytes!("../../../dos/rustland/examples/SNAKE.RS")),
     ("RPP/WRITE.RS", include_bytes!("../../../dos/rustland/examples/WRITE.RS")),
+    ("RPP/TEXT.RS", include_bytes!("../../../dos/rustland/examples/TEXT.RS")),
 ];
 
 /// R++ Write, installed in its own folder, C:\WRITE.
@@ -274,11 +275,14 @@ const WRITE_FILES: &[(&str, &[u8], bool)] = &[
     ("WRITE/WRITE.EXE", include_bytes!("../../../dos/write/WRITE.EXE"), true),
     ("WRITE/README.TXT", include_bytes!("../../../dos/write/README.TXT"), true),
     ("WRITE/SAMPLE.WP", include_bytes!("../../../dos/write/SAMPLE.WP"), false),
+    // Text, the plain text editor, in C:\TEXT.
+    ("TEXT/TEXT.EXE", include_bytes!("../../../dos/text/TEXT.EXE"), true),
+    ("TEXT/README.TXT", include_bytes!("../../../dos/text/README.TXT"), true),
 ];
 
 /// Put the current RUSTLAND.EXE in C:\, the examples in C:\RPP and R++
-/// Write in C:\WRITE. Programs and docs are kept current; documents and
-/// sources the user may have edited are only added if missing.
+/// Write in C:\WRITE and Text in C:\TEXT. Programs and docs are kept
+/// current; documents and sources the user may have edited are only added if missing.
 fn install_rustland(data: &mut [u8]) {
     let Ok(mut fs) = Fs::open(data) else { return };
     if fs.read("RUSTLAND.EXE").ok().as_deref() != Some(RUSTLAND_EXE) {

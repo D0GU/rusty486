@@ -1,6 +1,6 @@
 ﻿# Builds the Rustland R++ IDE (crates/rustland) for the 486 and packs it into
-# dos/rustland/RUSTLAND.EXE, and compiles R++ Write into dos/write/WRITE.EXE.
-# The emulator installs both on drive C:.
+# dos/rustland/RUSTLAND.EXE, compiles R++ Write into dos/write/WRITE.EXE and Text into
+# dos/text/TEXT.EXE. The emulator installs them on drive C:.
 #
 # Needs the i586 target: rustup target add i586-unknown-linux-gnu
 $ErrorActionPreference = "Continue"  # cargo writes progress to stderr
@@ -25,8 +25,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "pmpack failed" }
     # R++ Write, the word processor in C:\WRITE.
     & $cargo run --quiet --release -p rusty486-lang --bin rppc -- dos/rustland/examples/WRITE.RS dos/write/WRITE.EXE
-ustland\examples\WRITE.RS dos\write\WRITE.EXE
     if ($LASTEXITCODE -ne 0) { throw "compiling WRITE.RS failed" }
+    # Text, the plain text editor in C:\TEXT.
+    & $cargo run --quiet --release -p rusty486-lang --bin rppc -- dos/rustland/examples/TEXT.RS dos/text/TEXT.EXE
+    if ($LASTEXITCODE -ne 0) { throw "compiling TEXT.RS failed" }
 } finally {
     Pop-Location
 }
