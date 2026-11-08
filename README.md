@@ -179,7 +179,29 @@ cargo run --release -p rusty486-sdl -- --fda disk.img   # boot your own image
 
 Options: `--project DIR`, `--fda/--fdb/--hda/--hdb IMG`, `--mhz N`,
 `--mcp-port N`, `--no-mcp`. Keys: F12 opens the editor (Esc returns), Ctrl+F9
-builds and runs, F11 resets, Pause pauses; everything else goes to the guest. Disk images the guest writes to are saved when
+builds and runs, F11 resets, Pause pauses, **Ctrl+F12 opens Settings**,
+**Alt+Enter toggles fullscreen**; everything else goes to the guest.
+
+### Settings window
+
+Ctrl+F12 opens a graphical Settings window over the display (mouse or
+keyboard: arrows, Enter/Space, Tab between the sections and the page, Esc):
+
+- **Video:** fullscreen, aspect ratio (4:3 CRT, square pixels, stretch),
+  integer scaling, smooth filtering, CRT scanlines, window size.
+- **Emulation:** CPU speed (5-100 MHz), pause/resume, reset, pause while the
+  menu is open.
+- **Drives:** A: to D: with Insert (a picker of `.img` files from the rusty486
+  folder, the project and the current directory, or a typed path), Eject and
+  Save; a new blank TinyDOS floppy; save all disks.
+- **Audio:** mute and volume.
+- **Connection:** MCP server address and a button that copies the
+  `claude mcp add` command.
+
+Settings are saved in `%APPDATA%\rusty486\settings.json`; `--mhz` and
+`--mute` override them for one session. Over MCP, `get_settings`,
+`set_setting` and `settings_menu` do the same (and `screenshot` with
+`view: "settings"` shows the window). Disk images the guest writes to are saved when
 you close the window.
 
 ## Projects
@@ -223,6 +245,7 @@ claude mcp add --scope user --transport http rusty486 http://127.0.0.1:8486/mcp 
 | `project_info`, `read_source`, `write_source` | The open project and its source files |
 | `assemble`, `build`, `build_and_run` | Built-in assembler; `build_and_run` is the editor's Ctrl+F9 |
 | `set_view` | Show the machine or the editor (`screenshot` takes `view` too) |
+| `get_settings`, `set_setting`, `settings_menu` | Host settings (video, speed, audio) and the Settings window |
 | `type_text`, `press_key` | Keyboard input for the guest |
 | `dos_command` | Type a TinyDOS command and return the screen |
 | `disk_files`, `disk_read_file`, `disk_write_file`, `disk_delete` | Files on mounted FAT images |

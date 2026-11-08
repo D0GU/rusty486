@@ -16,6 +16,7 @@ use rusty486_core::Machine;
 use tokio::sync::oneshot;
 
 use crate::editor::{self, Editor, Level};
+use crate::settings::{Effect, Menu, Settings};
 use crate::project::Project;
 use crate::screen::Screen;
 
@@ -68,6 +69,11 @@ pub struct Emu {
     pub typing: VecDeque<(PcKey, bool)>,
     /// Sprite, map, sound and disk tabs.
     pub tabs: Tabs,
+    /// Host settings and the Settings window (Ctrl+F12).
+    pub settings: Settings,
+    pub menu: Option<Box<Menu>>,
+    /// Window changes requested by Settings, applied by the main loop.
+    pub effects: Vec<Effect>,
 }
 
 impl Emu {
@@ -90,7 +96,25 @@ impl Emu {
             last_build: None,
             keys: KeyState::default(),
             typing: VecDeque::new(),
+            settings: Settings::default(),
+            menu: Some(Box::new(Menu::new(None, None))),
+            effects: Vec::new(),
         }
+    }
+
+    /// Whether the Settings window is open.
+    pub fn menu_open(&self) -> bool {
+        self.menu.as_ref().is_some_and(|m| m.open)
+    }
+
+    /// Run `f` with the menu and settings borrowed alongside the session.
+    pub fn with_menu<R>(&mut self, f: impl FnOnce(&mut Menu, &mut Emu, &mut Settings) -> R) -> R {
+        let mut m = self.menu.take().expect("menu in use");
+        let mut s = std::mem::take(&mut self.settings);
+        let r = f(&mut m, self, &mut s);
+        self.settings = s;
+        self.menu = Some(m);
+        r
     }
 
     /// The asset tab shown in the editor, if it isn't the code tab.

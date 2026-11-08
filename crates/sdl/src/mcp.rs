@@ -203,8 +203,26 @@ pub struct LoadFileArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ScreenshotArgs {
-    /// "machine" (default), "editor", or "current" (whatever the window shows).
+    /// "machine" (default), "editor", "current" (whatever the window shows),
+    /// or "settings" (the window with the Settings overlay, if it is open).
     pub view: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SetSettingArgs {
+    /// fullscreen, aspect ("Crt", "Square", "Stretch"), integer_scale, smooth,
+    /// scanlines, window_scale (1-4), mhz, pause_in_menu, muted, volume (0-100).
+    pub name: String,
+    /// The new value (bool, number or string).
+    pub value: Value,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SettingsMenuArgs {
+    /// "open", "close", or "key" to press a key in the menu.
+    pub action: String,
+    /// For "key": an SDL key name such as "Down", "Return", "Tab", "Escape", "Left".
+    pub key: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -353,13 +371,81 @@ impl Rusty486Mcp {
                 };
                 let blink = emu.blink_on;
                 emu.blink_on = true;
-                emu.render(view);
+                let settings_view = a.view.as_deref() == Some("settings");
+                emu.render(if settings_view { emu.view } else { view });
                 emu.blink_on = blink;
+                if settings_view && emu.menu_open() {
+                    let mut m = emu.menu.take().unwrap();
+                    let ui = m.render(emu, &emu.settings).to_vec();
+                    emu.menu = Some(m);
+                    crate::settings::composite(&mut emu.screen, &ui);
+                }
                 emu.screen.png()
             })
             .await?;
         let data = base64::engine::general_purpose::STANDARD.encode(png);
         Ok(CallToolResult::success(vec![ContentBlock::image(data, "image/png")]))
+    }
+
+    #[tool(description = "The host settings of the rusty486 window (video, speed, audio) and \
+        whether the Settings window (Ctrl+F12) is open.")]
+    async fn get_settings(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| {
+            let mut v = serde_json::to_value(&emu.settings).map_err(|e| e.to_string())?;
+            v["settings_window_open"] = json!(emu.menu_open());
+            Ok(v)
+        })
+        .await
+    }
+
+    #[tool(description = "Change one host setting of the rusty486 window and save it, e.g. \
+        fullscreen=true, aspect=\"Stretch\", scanlines=true, mhz=66, volume=50.")]
+    async fn set_setting(&self, Parameters(a): Parameters<SetSettingArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let mut v = serde_json::to_value(&emu.settings).map_err(|e| e.to_string())?;
+            if v.get(&a.name).is_none() {
+                return Err(format!("unknown setting '{}'", a.name));
+            }
+            v[&a.name] = a.value.clone();
+            let new: crate::settings::Settings =
+                serde_json::from_value(v).map_err(|e| format!("bad value for {}: {e}", a.name))?;
+            emu.settings = new;
+            emu.machine.clock_hz = emu.settings.mhz as u64 * 1_000_000;
+            emu.settings.save();
+            emu.effects.push(crate::settings::Effect::Video);
+            if a.name == "window_scale" || a.name == "aspect" {
+                emu.effects.push(crate::settings::Effect::WindowScale);
+            }
+            serde_json::to_value(&emu.settings).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    #[tool(description = "Open or close the Settings window (as Ctrl+F12 does), or press a key \
+        in it. Use screenshot with view \"settings\" to see it.")]
+    async fn settings_menu(&self, Parameters(a): Parameters<SettingsMenuArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            match a.action.as_str() {
+                "open" | "close" => {
+                    let want = a.action == "open";
+                    if emu.menu_open() != want {
+                        emu.with_menu(|m, _, _| m.toggle());
+                    }
+                }
+                "key" => {
+                    if !emu.menu_open() {
+                        return Err("the Settings window is not open".into());
+                    }
+                    let name = a.key.as_deref().unwrap_or("");
+                    let k = sdl2::keyboard::Keycode::from_name(name).ok_or(format!("unknown key '{name}'"))?;
+                    let fx = emu.with_menu(|m, e, s| m.key(k, e, s));
+                    emu.effects.extend(fx);
+                }
+                other => return Err(format!("unknown action '{other}' (open, close, key)")),
+            }
+            Ok(json!({ "open": emu.menu_open() }))
+        })
+        .await
     }
 
     #[tool(description = "Read the 80x25 text screen as plain text, plus the cursor position. \
