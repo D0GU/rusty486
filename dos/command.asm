@@ -712,6 +712,19 @@ cmd_dir:
 .star:  dec si
         mov dword [si], '*.*'
 .search:
+        ; A drive that isn't there: say so, like MS-DOS.
+        cmp byte [path1+1], ':'
+        jne .drive_ok
+        mov dl, [path1]
+        or dl, 0x20
+        sub dl, 'a' - 1
+        mov ah, 0x36
+        int 0x21
+        cmp ax, 0xFFFF
+        jne .drive_ok
+        mov si, msg_baddrive
+        jmp print
+.drive_ok:
         call split_dir
         mov si, msg_dirof
         call print

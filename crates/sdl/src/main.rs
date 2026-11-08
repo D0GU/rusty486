@@ -164,7 +164,14 @@ fn run(args: Args) -> Result<(), String> {
     emu.machine.reset();
     emu.settings = settings;
 
-    if !args.disks.iter().any(|(d, _)| *d == Drive::C) {
+    // Disks inserted from the Drives page last time, unless the command line
+    // names something else for that drive.
+    let from_cli: Vec<Drive> = args.disks.iter().map(|(d, _)| *d).collect();
+    for line in emu.reattach_disks(&s.disks, &from_cli) {
+        println!("{line}");
+    }
+
+    if !args.disks.iter().any(|(d, _)| *d == Drive::C) && emu.disk_paths[Drive::C as usize].is_none() {
         // The persistent TinyDOS hard disk.
         let path = project::hdd_path();
         let data = project::open_or_create_hdd(&path)

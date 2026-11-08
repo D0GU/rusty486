@@ -48,6 +48,26 @@ pub struct Settings {
     pub pause_in_menu: bool,
     pub muted: bool,
     pub volume: u32,
+    /// Disk images inserted from the Drives page (A:, B:, C:, D:), put back
+    /// in at the next start. None: empty (for C:, the standard hdd.img).
+    pub disks: [Option<PathBuf>; 4],
+    /// Images inserted lately, newest first, offered by the image picker.
+    pub recent_images: Vec<PathBuf>,
+}
+
+/// How many recent images the picker remembers.
+const RECENT_IMAGES: usize = 10;
+
+impl Settings {
+    /// Note that `path` is now in `drive` (None: ejected), for next time.
+    pub fn remember_disk(&mut self, drive: usize, path: Option<PathBuf>) {
+        if let Some(p) = &path {
+            self.recent_images.retain(|r| r != p);
+            self.recent_images.insert(0, p.clone());
+            self.recent_images.truncate(RECENT_IMAGES);
+        }
+        self.disks[drive] = path;
+    }
 }
 
 impl Default for Settings {
@@ -64,6 +84,8 @@ impl Default for Settings {
             pause_in_menu: false,
             muted: false,
             volume: 80,
+            disks: Default::default(),
+            recent_images: Vec::new(),
         }
     }
 }
@@ -492,11 +514,12 @@ impl Menu {
             Id::Drive(drv) => {
                 let drive = [Drive::A, Drive::B, Drive::C, Drive::D][drv];
                 match col {
-                    0 => self.open_picker(drv, emu),
+                    0 => self.open_picker(drv, emu, s),
                     1 => {
                         let _ = emu.save_disk(drive);
                         emu.machine.eject_disk(drive);
                         emu.disk_paths[drv] = None;
+                        s.remember_disk(drv, None);
                         self.message = format!("Ejected {}:", ["A", "B", "C", "D"][drv]);
                     }
                     _ => {
@@ -515,6 +538,7 @@ impl Menu {
                     Ok(data) => match std::fs::write(&path, &data) {
                         Ok(()) => {
                             emu.insert_disk(Drive::A, path.clone(), DiskImage::new(data));
+                            s.remember_disk(0, Some(path.clone()));
                             format!("New floppy in A: {}", path.file_name().unwrap().to_string_lossy())
                         }
                         Err(e) => format!("Cannot write {}: {e}", path.display()),
@@ -540,11 +564,21 @@ impl Menu {
         fx
     }
 
-    fn open_picker(&mut self, drive: usize, emu: &Emu) {
-        let mut files = Vec::new();
+    fn open_picker(&mut self, drive: usize, emu: &Emu, s: &Settings) {
+        // Recent images first, then images in the usual folders and in the
+        // folders of recent and mounted images.
+        let mut files: Vec<PathBuf> = s.recent_images.iter().filter(|p| p.is_file()).cloned().collect();
+        let recent = files.len();
         let mut dirs = vec![image_dir(), emu.project.dir.clone(), emu.project.dir.join("build")];
         if let Ok(cwd) = std::env::current_dir() {
             dirs.push(cwd);
+        }
+        for p in s.recent_images.iter().chain(emu.disk_paths.iter().flatten()) {
+            if let Some(d) = p.parent() {
+                if !dirs.iter().any(|x| x == d) {
+                    dirs.push(d.to_path_buf());
+                }
+            }
         }
         for dir in dirs {
             if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -557,18 +591,20 @@ impl Menu {
                 }
             }
         }
-        files.sort();
+        files[recent..].sort();
         let path = emu.disk_paths[drive].as_ref().map(|p| p.display().to_string()).unwrap_or_default();
         self.picker = Some(Picker { drive, files, sel: 0, top: 0, path, typing: false, focus_button: 0 });
     }
 
-    fn picker_insert(&mut self, emu: &mut Emu) {
+    fn picker_insert(&mut self, emu: &mut Emu, s: &mut Settings) {
         let Some(p) = self.picker.take() else { return };
         let path = if p.typing || p.files.is_empty() { PathBuf::from(p.path.trim()) } else { p.files[p.sel].clone() };
         let drive = [Drive::A, Drive::B, Drive::C, Drive::D][p.drive];
         self.message = match std::fs::read(&path) {
             Ok(data) => {
                 emu.insert_disk(drive, path.clone(), DiskImage::new(data));
+                s.remember_disk(p.drive, Some(path.clone()));
+                s.save();
                 format!("Inserted {} in {}:", path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), ["A", "B", "C", "D"][p.drive])
             }
             Err(e) => format!("Cannot read {}: {e}", path.display()),
@@ -587,7 +623,7 @@ impl Menu {
                     if p.focus_button == 1 {
                         self.picker = None;
                     } else {
-                        self.picker_insert(emu);
+                        self.picker_insert(emu, s);
                     }
                 }
                 K::Tab => {
@@ -741,7 +777,7 @@ impl Menu {
             Some(Hit::PickerFile(i)) => {
                 if let Some(p) = &mut self.picker {
                     if p.sel == i && !p.typing {
-                        self.picker_insert(emu);
+                        self.picker_insert(emu, s);
                     } else {
                         p.sel = i;
                         p.typing = false;
@@ -755,7 +791,7 @@ impl Menu {
             }
             Some(Hit::PickerButton(b)) => {
                 if b == 0 {
-                    self.picker_insert(emu);
+                    self.picker_insert(emu, s);
                 } else {
                     self.picker = None;
                 }
@@ -1024,6 +1060,89 @@ mod tests {
         enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+    }
+
+    /// A small FAT image file for drive tests.
+    fn image_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rusty486-drives-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, rusty486_firmware::tinydos_floppy("DATA", &[("HI.TXT", b"hi")]).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn remember_disk_keeps_recent_images_unique() {
+        let mut s = Settings::default();
+        let (a, b) = (PathBuf::from("a.img"), PathBuf::from("b.img"));
+        s.remember_disk(3, Some(a.clone()));
+        s.remember_disk(1, Some(b.clone()));
+        s.remember_disk(3, Some(a.clone()));
+        assert_eq!(s.disks[3], Some(a.clone()));
+        assert_eq!(s.disks[1], Some(b.clone()));
+        assert_eq!(s.recent_images, vec![a.clone(), b.clone()]);
+        s.remember_disk(3, None);
+        assert_eq!(s.disks[3], None);
+        assert_eq!(s.recent_images.len(), 2, "ejecting keeps the image in the recent list");
+        for i in 0..20 {
+            s.remember_disk(0, Some(PathBuf::from(format!("{i}.img"))));
+        }
+        assert_eq!(s.recent_images.len(), RECENT_IMAGES);
+        // Old settings files without the new fields still load.
+        let old: Settings = serde_json::from_str(r#"{"mhz": 50}"#).unwrap();
+        assert_eq!(old.disks, [None, None, None, None]);
+        let round: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round, s);
+    }
+
+    #[test]
+    fn insert_into_d_from_the_menu_is_remembered_and_reattached() {
+        use sdl2::keyboard::Keycode as K;
+        let img = image_file("hdd-d.img");
+        let mut emu = test_emu();
+        let mut s = Settings::default();
+        let mut m = Menu::new(None, None);
+        m.toggle();
+        // Drives page, row D: (the fourth drive), Insert.
+        m.cat = 2;
+        m.in_sidebar = false;
+        m.row = 3;
+        m.col = 0;
+        m.key(K::Return, &mut emu, &mut s);
+        assert_eq!(m.picker.as_ref().unwrap().drive, 3);
+        // Type the path into the field and insert.
+        m.key(K::Tab, &mut emu, &mut s);
+        m.picker.as_mut().unwrap().path.clear();
+        m.text(&img.display().to_string());
+        m.key(K::Return, &mut emu, &mut s);
+        assert!(m.picker.is_none());
+        assert!(emu.machine.bus.disk.drives[3].is_some(), "{}", m.message);
+        assert_eq!(emu.disk_paths[3], Some(img.clone()));
+        assert_eq!(s.disks[3], Some(img.clone()));
+        assert_eq!(s.recent_images.first(), Some(&img));
+
+        // Next time the picker offers it first.
+        m.key(K::Return, &mut emu, &mut s);
+        assert_eq!(m.picker.as_ref().unwrap().files.first(), Some(&img));
+        m.key(K::Escape, &mut emu, &mut s);
+
+        // A fresh session puts it back in D:, unless the command line took D:.
+        let mut emu2 = test_emu();
+        let log = emu2.reattach_disks(&s.disks, &[]);
+        assert!(log[0].contains("remembered"), "{log:?}");
+        assert_eq!(emu2.disk_paths[3], Some(img.clone()));
+        let mut emu3 = test_emu();
+        assert!(emu3.reattach_disks(&s.disks, &[Drive::D]).is_empty());
+        assert!(emu3.disk_paths[3].is_none());
+
+        // Eject forgets it; a missing file is reported, not fatal.
+        m.col = 1;
+        m.key(K::Return, &mut emu, &mut s);
+        assert!(emu.machine.bus.disk.drives[3].is_none());
+        assert_eq!(s.disks[3], None);
+        let gone = [None, None, None, Some(PathBuf::from("no/such/disk.img"))];
+        let log = test_emu().reattach_disks(&gone, &[]);
+        assert!(log[0].contains("not inserted"), "{log:?}");
     }
 
     #[test]

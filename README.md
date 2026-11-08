@@ -224,7 +224,7 @@ cargo run --release -p rusty486-sdl -- --fda disk.img   # boot your own image
 ```
 
 Options: `--project DIR`, `--fda/--fdb/--hda/--hdb IMG`, `--mhz N`,
-`--mcp-port N`, `--no-mcp`. Keys: F12 opens the editor (Esc returns), Ctrl+F9
+`--cpu 486sx|r1024`, `--mcp-port N`, `--no-mcp`. Keys: F12 opens the editor (Esc returns), Ctrl+F9
 builds and runs, F11 resets, Pause pauses, **Ctrl+F12 opens Settings**,
 **Alt+Enter toggles fullscreen**; everything else goes to the guest.
 
@@ -235,17 +235,23 @@ keyboard: arrows, Enter/Space, Tab between the sections and the page, Esc):
 
 - **Video:** fullscreen, aspect ratio (4:3 CRT, square pixels, stretch),
   integer scaling, smooth filtering, CRT scanlines, window size.
-- **Emulation:** CPU speed (5-100 MHz), pause/resume, reset, pause while the
-  menu is open.
-- **Drives:** A: to D: with Insert (a picker of `.img` files from the rusty486
-  folder, the project and the current directory, or a typed path), Eject and
-  Save; a new blank TinyDOS floppy; save all disks.
+- **Emulation:** CPU (486SX, or the fantasy **R1024**: a 486 with an x87 FPU
+  and a turbo clock that runs as fast as the host allows, up to 1024 MHz;
+  changing it resets the machine), CPU speed (5-100 MHz, 486SX only),
+  pause/resume, reset, pause while the menu is open.
+- **Drives:** A: to D: with Insert (a picker of recently used images, then
+  `.img` files from the rusty486 folder, the project, the current directory
+  and the folders of recent images, or a typed path), Eject and Save; a new
+  blank TinyDOS floppy; save all disks. Disks inserted here are remembered
+  and put back at the next start (a `--fda`..`--hdb` option overrides its
+  drive for that session). TinyDOS notices disks inserted, swapped or
+  ejected while it runs.
 - **Audio:** mute and volume.
 - **Connection:** MCP server address and a button that copies the
   `claude mcp add` command.
 
-Settings are saved in `%APPDATA%\rusty486\settings.json`; `--mhz` and
-`--mute` override them for one session. Over MCP, `get_settings`,
+Settings are saved in `%APPDATA%\rusty486\settings.json`; `--mhz`, `--cpu`
+and `--mute` override them for one session. Over MCP, `get_settings`,
 `set_setting` and `settings_menu` do the same (and `screenshot` with
 `view: "settings"` shows the window). Disk images the guest writes to are saved when
 you close the window.

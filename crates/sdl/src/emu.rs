@@ -341,6 +341,27 @@ impl Emu {
         }
     }
 
+    /// Put back the disks remembered in the settings (A:, B:, C:, D:),
+    /// except in drives listed in `skip`. Returns a line per drive tried.
+    pub fn reattach_disks(&mut self, disks: &[Option<PathBuf>; 4], skip: &[Drive]) -> Vec<String> {
+        let mut log = Vec::new();
+        for (i, drive) in [Drive::A, Drive::B, Drive::C, Drive::D].into_iter().enumerate() {
+            let Some(path) = disks[i].clone() else { continue };
+            if skip.contains(&drive) {
+                continue;
+            }
+            let letter = ["A", "B", "C", "D"][i];
+            match std::fs::read(&path) {
+                Ok(data) => {
+                    log.push(format!("{letter}: {} (remembered)", path.display()));
+                    self.insert_disk(drive, path, DiskImage::new(data));
+                }
+                Err(e) => log.push(format!("{letter}: {}: {e} (not inserted)", path.display())),
+            }
+        }
+        log
+    }
+
     pub fn insert_disk(&mut self, drive: Drive, path: PathBuf, image: DiskImage) {
         // Save the old disk only if it's a different file.
         if self.disk_paths[drive as usize].as_ref() != Some(&path) {
