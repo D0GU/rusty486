@@ -17,10 +17,12 @@ built-in editor and an MCP server so Claude Code can drive the machine.
   boot, plus the small services DOS expects.
 - Frontend (SDL2): 80x25 colour text mode, throttled to 33 MHz.
 
+**Milestone 2, done:** MCP server, so Claude Code can see and drive the running machine.
+
 ## Roadmap
 
 1. ~~Real-mode boot to text~~
-2. MCP server (local HTTP + token) so Claude Code can drive the machine
+2. ~~MCP server (local HTTP + token) so Claude Code can drive the machine~~
 3. Code editor with a built-in NASM-syntax assembler
 4. Protected mode and paging, VBE graphics, mini-DOS, sprite/map/sound editors,
    OPL2 + Sound Blaster, and a drive manager
@@ -35,8 +37,36 @@ cargo run --release -p rusty486-sdl                     # boots the built-in dem
 cargo run --release -p rusty486-sdl -- --fda disk.img   # boot your own image
 ```
 
-Options: `--fda/--fdb/--hda/--hdb IMG`, `--mhz N`. Keys: F11 resets, Pause
-pauses. Disk images the guest writes to are saved when you close the window.
+Options: `--fda/--fdb/--hda/--hdb IMG`, `--mhz N`, `--mcp-port N`, `--no-mcp`.
+Keys: F11 resets, Pause pauses. Disk images the guest writes to are saved when
+you close the window.
+
+## MCP server (Claude Code integration)
+
+While the window is open, rusty486 serves MCP over streamable HTTP at
+`http://127.0.0.1:8486/mcp`. It only listens on localhost and requires a bearer
+token, generated on first run and stored in `%APPDATA%\rusty486\mcp-token`. On
+startup it prints the exact command to register it:
+
+```sh
+claude mcp add --scope user --transport http rusty486 http://127.0.0.1:8486/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+| Tool | What it does |
+|------|--------------|
+| `status` | Running/paused (and why), CS:IP, cycles, disks, breakpoints |
+| `screenshot`, `screen_text` | The screen as a PNG or as plain text with the cursor position |
+| `get_registers`, `set_register` | CPU state |
+| `read_memory`, `write_memory` | Hex dump / poke; addresses as `SEG:OFF` (e.g. `cs:0100`) or linear hex |
+| `pause`, `resume`, `step`, `run`, `reset` | Execution control; `run` waits for emulated time or a breakpoint |
+| `breakpoint_add`, `breakpoint_remove` | Execution breakpoints |
+| `debug_log` | Text written to debug port E9h (the BIOS mirrors its output there) |
+| `disk_insert`, `disk_eject`, `disk_save`, `disk_list` | Mount raw `.img` files (can create blank ones) |
+| `load_file` | Copy a flat binary into memory and optionally jump to it |
+
+Tool calls run on the UI thread between frames, so Claude and the window
+always see the same machine.
 
 ## Tests
 

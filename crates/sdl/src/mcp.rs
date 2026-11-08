@@ -1,0 +1,765 @@
+//! MCP server: lets Claude Code (or any MCP client) see and drive the running
+//! machine over streamable HTTP on localhost, protected by a bearer token.
+//!
+//! The server runs on its own thread with a tokio runtime. Every tool turns
+//! into a `Job` that the UI thread executes between frames, so the window and
+//! the MCP client always see the same machine.
+
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::extract::{Request, State};
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use base64::Engine;
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rusty486_core::cpu::{self, flags, Cpu};
+use rusty486_core::devices::disk::DiskImage;
+use rusty486_core::machine::Drive;
+use rusty486_core::Bus;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tokio::sync::oneshot;
+
+use crate::emu::{Emu, Job, Waiter};
+
+pub const DEFAULT_PORT: u16 = 8486;
+
+/// Longest a single `run` call may wait, in real time.
+const MAX_RUN_WAIT: Duration = Duration::from_secs(120);
+
+// ------------------------------------------------------------------ startup
+
+/// Load the bearer token from the config directory, creating one if needed.
+pub fn load_or_create_token() -> std::io::Result<(String, PathBuf)> {
+    let dir = config_dir();
+    let path = dir.join("mcp-token");
+    if let Ok(t) = std::fs::read_to_string(&path) {
+        let t = t.trim().to_string();
+        if t.len() >= 32 {
+            return Ok((t, path));
+        }
+    }
+    let mut buf = [0u8; 24];
+    getrandom::fill(&mut buf).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, &token)?;
+    Ok((token, path))
+}
+
+fn config_dir() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("rusty486")
+}
+
+/// Start the server on a background thread. Returns the URL it listens on.
+pub fn start(port: u16, token: String, jobs: Sender<Job>) -> Result<String, String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind(("127.0.0.1", port)))
+        .map_err(|e| format!("cannot listen on 127.0.0.1:{port}: {e}"))?;
+
+    let server = Rusty486Mcp::new(jobs);
+    let service = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    let router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(middleware::from_fn_with_state(Arc::new(token), require_token));
+
+    std::thread::Builder::new()
+        .name("mcp-server".into())
+        .spawn(move || {
+            rt.block_on(async move {
+                if let Err(e) = axum::serve(listener, router).await {
+                    eprintln!("MCP server stopped: {e}");
+                }
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(format!("http://127.0.0.1:{port}/mcp"))
+}
+
+/// Reject requests without `Authorization: Bearer <token>`.
+async fn require_token(State(token): State<Arc<String>>, req: Request, next: Next) -> Response {
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    // Compare in constant time so the token can't be guessed byte by byte.
+    let ok = presented.len() == token.len()
+        && presented.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+    if ok {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response()
+    }
+}
+
+// ------------------------------------------------------------------ parameters
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct AddressArg {
+    /// Address: "SEG:OFF" (hex, SEG may be a register name like "cs") or a
+    /// linear hex address like "B8000" / "0xB8000".
+    pub address: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ReadMemoryArgs {
+    /// Address: "SEG:OFF" (hex, SEG may be a register name like "cs") or a linear hex address.
+    pub address: String,
+    /// Number of bytes to read (max 4096).
+    pub length: u32,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct WriteMemoryArgs {
+    /// Address: "SEG:OFF" (hex, SEG may be a register name like "cs") or a linear hex address.
+    pub address: String,
+    /// Bytes to write as hex, e.g. "B8 00 4C CD 21" (spaces optional).
+    pub bytes: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SetRegisterArgs {
+    /// Register name: eax..edi, ax..di, al..bh, eip/ip, eflags/flags, cs/ds/es/ss/fs/gs, cr0.
+    pub name: String,
+    /// New value in hex.
+    pub value: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct StepArgs {
+    /// Number of instructions to execute (default 1, max 100000).
+    pub count: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RunArgs {
+    /// Emulated milliseconds to run (default 1000). Runs at the machine's real
+    /// clock speed, so this is also roughly the wall-clock wait. Max 120000.
+    pub milliseconds: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DebugLogArgs {
+    /// Clear the log after reading it (default false).
+    pub clear: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DiskInsertArgs {
+    /// Drive letter: A, B (floppies) or C, D (hard disks).
+    pub drive: String,
+    /// Path to a raw disk image on the host.
+    pub path: String,
+    /// If the file doesn't exist, create a blank image of this many KB
+    /// (1440 for a 1.44 MB floppy).
+    pub create_kb: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DriveArg {
+    /// Drive letter: A, B, C or D.
+    pub drive: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct LoadFileArgs {
+    /// Path to a file on the host.
+    pub path: String,
+    /// Where to load it: "SEG:OFF" or a linear hex address.
+    pub address: String,
+    /// Also point CS:IP at the load address (needs "SEG:OFF" form). Default false.
+    pub jump: Option<bool>,
+}
+
+// ------------------------------------------------------------------ server
+
+#[derive(Clone)]
+pub struct Rusty486Mcp {
+    tool_router: ToolRouter<Self>,
+    jobs: Sender<Job>,
+}
+
+impl Rusty486Mcp {
+    fn new(jobs: Sender<Job>) -> Self {
+        Rusty486Mcp { tool_router: Self::tool_router(), jobs }
+    }
+
+    /// Run `f` on the UI thread and return its result.
+    async fn with<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Emu) -> T + Send + 'static,
+    ) -> Result<T, McpError> {
+        let (tx, rx) = oneshot::channel();
+        self.jobs
+            .send(Box::new(move |emu: &mut Emu| {
+                let _ = tx.send(f(emu));
+            }))
+            .map_err(|_| McpError::internal_error("emulator is shutting down", None))?;
+        rx.await.map_err(|_| McpError::internal_error("emulator dropped the request", None))
+    }
+
+    /// Like `with`, for closures that can fail with a message for the caller.
+    async fn try_with(
+        &self,
+        f: impl FnOnce(&mut Emu) -> Result<Value, String> + Send + 'static,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(match self.with(f).await? {
+            Ok(v) => json_result(v),
+            Err(msg) => CallToolResult::error(vec![ContentBlock::text(msg)]),
+        })
+    }
+}
+
+fn json_result(v: Value) -> CallToolResult {
+    let text = match v {
+        Value::String(s) => s,
+        v => serde_json::to_string_pretty(&v).unwrap_or_default(),
+    };
+    CallToolResult::success(vec![ContentBlock::text(text)])
+}
+
+#[tool_router]
+impl Rusty486Mcp {
+    #[tool(description = "Machine overview: running/paused (and why), cycle count, clock speed, \
+        CS:IP, halted state, mounted disks and breakpoints.")]
+    async fn status(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| Ok(status_json(emu))).await
+    }
+
+    #[tool(description = "Capture the screen as a PNG image (640x400, 80x25 text mode).")]
+    async fn screenshot(&self) -> Result<CallToolResult, McpError> {
+        let png = self
+            .with(|emu| {
+                emu.screen.render(&emu.machine, true);
+                emu.screen.png()
+            })
+            .await?;
+        let data = base64::engine::general_purpose::STANDARD.encode(png);
+        Ok(CallToolResult::success(vec![ContentBlock::image(data, "image/png")]))
+    }
+
+    #[tool(description = "Read the 80x25 text screen as plain text, plus the cursor position. \
+        Cheaper than a screenshot when only the text matters.")]
+    async fn screen_text(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| {
+            let cur = emu.machine.bus.video.cursor_offset() as usize;
+            let lines: Vec<String> = emu.machine.screen_text().lines().map(String::from).collect();
+            Ok(json!({
+                "cursor": { "row": cur / 80, "col": cur % 80 },
+                "screen": lines.join("\n"),
+            }))
+        })
+        .await
+    }
+
+    #[tool(description = "Read all CPU registers, segment registers, flags and control registers.")]
+    async fn get_registers(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| Ok(registers_json(&emu.machine.cpu))).await
+    }
+
+    #[tool(description = "Set a CPU register. Values are hex. Segment registers use real-mode \
+        semantics (base = value * 16).")]
+    async fn set_register(
+        &self,
+        Parameters(a): Parameters<SetRegisterArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let v = parse_hex(&a.value)?;
+            set_register(&mut emu.machine.cpu, &a.name, v)?;
+            Ok(registers_json(&emu.machine.cpu))
+        })
+        .await
+    }
+
+    #[tool(description = "Read emulated memory as a hex dump with ASCII. Addresses are physical \
+        (A20 enabled); the BIOS ROM is visible at F0000-FFFFF.")]
+    async fn read_memory(
+        &self,
+        Parameters(a): Parameters<ReadMemoryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let start = parse_address(&a.address, &emu.machine.cpu)?;
+            let len = a.length.min(4096);
+            let bytes: Vec<u8> =
+                (0..len).map(|i| emu.machine.bus.read8(start.wrapping_add(i))).collect();
+            Ok(Value::String(hex_dump(start, &bytes)))
+        })
+        .await
+    }
+
+    #[tool(description = "Write bytes into emulated memory (ROM writes are ignored).")]
+    async fn write_memory(
+        &self,
+        Parameters(a): Parameters<WriteMemoryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let start = parse_address(&a.address, &emu.machine.cpu)?;
+            let bytes = parse_bytes(&a.bytes)?;
+            for (i, b) in bytes.iter().enumerate() {
+                emu.machine.bus.write8(start.wrapping_add(i as u32), *b);
+            }
+            Ok(json!({ "written": bytes.len(), "address": format!("{start:05X}") }))
+        })
+        .await
+    }
+
+    #[tool(description = "Pause emulation.")]
+    async fn pause(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| {
+            emu.pause("paused via MCP".into());
+            Ok(status_json(emu))
+        })
+        .await
+    }
+
+    #[tool(description = "Resume emulation at normal speed (returns immediately; use `run` to \
+        wait for a while).")]
+    async fn resume(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| {
+            emu.resume();
+            Ok(status_json(emu))
+        })
+        .await
+    }
+
+    #[tool(description = "Execute instructions one at a time (pauses the machine first), then \
+        return the registers. Stops early at breakpoints after the first instruction.")]
+    async fn step(&self, Parameters(a): Parameters<StepArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            emu.pause("single-stepping".into());
+            let n = a.count.unwrap_or(1).clamp(1, 100_000);
+            let mut executed = 0;
+            for i in 0..n {
+                emu.machine.step();
+                executed += 1;
+                if i + 1 < n && emu.machine.breakpoints.contains(&emu.machine.pc()) {
+                    break;
+                }
+            }
+            let mut v = registers_json(&emu.machine.cpu);
+            v["executed"] = json!(executed);
+            Ok(v)
+        })
+        .await
+    }
+
+    #[tool(description = "Resume and wait while the machine runs for the given emulated time, \
+        or until it hits a breakpoint. Returns the status afterwards.")]
+    async fn run(&self, Parameters(a): Parameters<RunArgs>) -> Result<CallToolResult, McpError> {
+        let ms = a.milliseconds.unwrap_or(1000).min(MAX_RUN_WAIT.as_millis() as u64);
+        let (tx, rx) = oneshot::channel();
+        self.with(move |emu| {
+            let cycles = emu.machine.clock_hz * ms / 1000;
+            emu.resume();
+            emu.waiters.push(Waiter { until_cycle: emu.machine.cpu.cycles + cycles, reply: tx });
+        })
+        .await?;
+        let outcome = match tokio::time::timeout(MAX_RUN_WAIT + Duration::from_secs(5), rx).await {
+            Ok(Ok(msg)) => msg,
+            _ => "timed out waiting for the emulator".to_string(),
+        };
+        self.try_with(move |emu| {
+            let mut v = status_json(emu);
+            v["run"] = json!(outcome);
+            Ok(v)
+        })
+        .await
+    }
+
+    #[tool(description = "Hardware reset: the CPU restarts at F000:FFF0 and the BIOS boots \
+        again. Memory, disks and breakpoints are kept. Leaves the machine running.")]
+    async fn reset(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| {
+            emu.machine.reset();
+            emu.resume();
+            Ok(status_json(emu))
+        })
+        .await
+    }
+
+    #[tool(description = "Add an execution breakpoint. Execution pauses before the instruction \
+        at this address runs.")]
+    async fn breakpoint_add(
+        &self,
+        Parameters(a): Parameters<AddressArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let addr = parse_address(&a.address, &emu.machine.cpu)?;
+            emu.machine.breakpoints.insert(addr);
+            Ok(breakpoints_json(emu))
+        })
+        .await
+    }
+
+    #[tool(description = "Remove an execution breakpoint, or all of them with address \"all\".")]
+    async fn breakpoint_remove(
+        &self,
+        Parameters(a): Parameters<AddressArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            if a.address.eq_ignore_ascii_case("all") {
+                emu.machine.breakpoints.clear();
+            } else {
+                let addr = parse_address(&a.address, &emu.machine.cpu)?;
+                if !emu.machine.breakpoints.remove(&addr) {
+                    return Err(format!("no breakpoint at {addr:05X}"));
+                }
+            }
+            Ok(breakpoints_json(emu))
+        })
+        .await
+    }
+
+    #[tool(description = "Read text written to the debug console (port E9h). The BIOS mirrors \
+        everything it prints there, and guest programs can write to it for logging.")]
+    async fn debug_log(
+        &self,
+        Parameters(a): Parameters<DebugLogArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let text = emu.log.clone();
+            if a.clear.unwrap_or(false) {
+                emu.log.clear();
+            }
+            Ok(Value::String(if text.is_empty() { "(empty)".into() } else { text }))
+        })
+        .await
+    }
+
+    #[tool(description = "Mount a raw disk image file in a drive (replacing any disk there, \
+        which is saved first if modified). Reset afterwards to boot from it.")]
+    async fn disk_insert(
+        &self,
+        Parameters(a): Parameters<DiskInsertArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let drive = parse_drive(&a.drive)?;
+            let path = PathBuf::from(&a.path);
+            let data = match std::fs::read(&path) {
+                Ok(d) => d,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => match a.create_kb {
+                    Some(kb) => {
+                        let d = vec![0u8; kb as usize * 1024];
+                        std::fs::write(&path, &d).map_err(|e| format!("{}: {e}", a.path))?;
+                        d
+                    }
+                    None => return Err(format!("{}: file not found (pass create_kb to create it)", a.path)),
+                },
+                Err(e) => return Err(format!("{}: {e}", a.path)),
+            };
+            emu.insert_disk(drive, path, DiskImage::new(data));
+            Ok(disks_json(emu))
+        })
+        .await
+    }
+
+    #[tool(description = "Eject the disk from a drive, saving it to its file first if modified.")]
+    async fn disk_eject(&self, Parameters(a): Parameters<DriveArg>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let drive = parse_drive(&a.drive)?;
+            emu.save_disk(drive).map_err(|e| e.to_string())?;
+            emu.machine.eject_disk(drive);
+            emu.disk_paths[drive as usize] = None;
+            Ok(disks_json(emu))
+        })
+        .await
+    }
+
+    #[tool(description = "Write a drive's image back to its host file now (normally this happens \
+        on eject and when rusty486 exits).")]
+    async fn disk_save(&self, Parameters(a): Parameters<DriveArg>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let drive = parse_drive(&a.drive)?;
+            let saved = emu.save_disk(drive).map_err(|e| e.to_string())?;
+            Ok(json!({ "saved": saved, "disks": disks_json(emu) }))
+        })
+        .await
+    }
+
+    #[tool(description = "List mounted disks with their geometry and host files.")]
+    async fn disk_list(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| Ok(disks_json(emu))).await
+    }
+
+    #[tool(description = "Copy a host file straight into emulated memory, e.g. a flat binary \
+        assembled with `nasm -f bin`. With jump=true, CS:IP is set to the load address so the \
+        code runs next (use a SEG:OFF address, e.g. 1000:0100).")]
+    async fn load_file(&self, Parameters(a): Parameters<LoadFileArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let data = std::fs::read(&a.path).map_err(|e| format!("{}: {e}", a.path))?;
+            let start = parse_address(&a.address, &emu.machine.cpu)?;
+            for (i, b) in data.iter().enumerate() {
+                emu.machine.bus.write8(start.wrapping_add(i as u32), *b);
+            }
+            if a.jump.unwrap_or(false) {
+                let (seg, off) = a
+                    .address
+                    .split_once(':')
+                    .ok_or("jump needs a SEG:OFF address")?;
+                let seg = parse_segment(seg, &emu.machine.cpu)?;
+                let off = parse_hex(off)?;
+                let cpu = &mut emu.machine.cpu;
+                cpu.set_segment(cpu::CS, seg);
+                cpu.eip = off;
+                cpu.halted = false;
+            }
+            Ok(json!({ "loaded": data.len(), "address": format!("{start:05X}"), "registers": registers_json(&emu.machine.cpu) }))
+        })
+        .await
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for Rusty486Mcp {
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "rusty486 is a fantasy 486 PC emulator: an i486 CPU in real mode with a PC-style \
+             BIOS and 80x25 colour text mode. These tools control the live machine shown in the \
+             rusty486 window. Addresses are hex: 'SEG:OFF' (e.g. 'B800:0000', 'cs:0100') or \
+             linear ('B8000'). Typical loop: write code, assemble it with `nasm -f bin`, put it \
+             on a disk image or load it with load_file, then run/step and inspect with \
+             screen_text, screenshot, get_registers and read_memory. Programs can log text by \
+             writing bytes to port E9h (see debug_log).",
+        )
+    }
+}
+
+// ------------------------------------------------------------------ helpers
+
+fn status_json(emu: &Emu) -> Value {
+    let m = &emu.machine;
+    let c = &m.cpu;
+    let state = if c.shutdown {
+        "shutdown"
+    } else if emu.paused {
+        "paused"
+    } else if c.halted {
+        "halted"
+    } else {
+        "running"
+    };
+    json!({
+        "state": state,
+        "stop_reason": if emu.stop_reason.is_empty() { Value::Null } else { json!(emu.stop_reason) },
+        "cs_ip": format!("{:04X}:{:04X}", c.sregs[cpu::CS], c.eip),
+        "pc_linear": format!("{:05X}", m.pc()),
+        "halted": c.halted,
+        "interrupts_enabled": c.eflags & flags::IF != 0,
+        "cycles": c.cycles,
+        "clock_mhz": m.clock_hz as f64 / 1e6,
+        "emulated_seconds": c.cycles as f64 / m.clock_hz as f64,
+        "disks": disks_json(emu),
+        "breakpoints": breakpoints_json(emu),
+    })
+}
+
+fn registers_json(c: &Cpu) -> Value {
+    let f = c.eflags;
+    let bit = |b: u32, s: &'static str| if f & b != 0 { s } else { "-" };
+    let flag_str = [
+        bit(flags::OF, "O"),
+        bit(flags::DF, "D"),
+        bit(flags::IF, "I"),
+        bit(flags::TF, "T"),
+        bit(flags::SF, "S"),
+        bit(flags::ZF, "Z"),
+        bit(flags::AF, "A"),
+        bit(flags::PF, "P"),
+        bit(flags::CF, "C"),
+    ]
+    .concat();
+    let r = |i: usize| format!("{:08X}", c.regs[i]);
+    let s = |i: usize| format!("{:04X}", c.sregs[i]);
+    json!({
+        "eax": r(cpu::EAX), "ebx": r(cpu::EBX), "ecx": r(cpu::ECX), "edx": r(cpu::EDX),
+        "esi": r(cpu::ESI), "edi": r(cpu::EDI), "ebp": r(cpu::EBP), "esp": r(cpu::ESP),
+        "eip": format!("{:08X}", c.eip),
+        "cs": s(cpu::CS), "ds": s(cpu::DS), "es": s(cpu::ES), "ss": s(cpu::SS),
+        "fs": s(cpu::FS), "gs": s(cpu::GS),
+        "eflags": format!("{f:08X}"),
+        "flags": flag_str,
+        "cr0": format!("{:08X}", c.cr0),
+        "halted": c.halted,
+    })
+}
+
+fn breakpoints_json(emu: &Emu) -> Value {
+    json!(emu.machine.breakpoints.iter().map(|a| format!("{a:05X}")).collect::<Vec<_>>())
+}
+
+fn disks_json(emu: &Emu) -> Value {
+    let mut out = serde_json::Map::new();
+    for (i, letter) in ["A", "B", "C", "D"].iter().enumerate() {
+        if let Some(d) = &emu.machine.bus.disk.drives[i] {
+            out.insert(
+                letter.to_string(),
+                json!({
+                    "file": emu.disk_paths[i].as_ref().map(|p| p.display().to_string()),
+                    "size_kb": d.data.len() / 1024,
+                    "chs": format!("{}/{}/{}", d.cylinders, d.heads, d.sectors),
+                    "modified": d.dirty,
+                    "read_only": d.read_only,
+                }),
+            );
+        }
+    }
+    Value::Object(out)
+}
+
+fn parse_drive(s: &str) -> Result<Drive, String> {
+    match s.trim().trim_end_matches(':').to_ascii_uppercase().as_str() {
+        "A" => Ok(Drive::A),
+        "B" => Ok(Drive::B),
+        "C" => Ok(Drive::C),
+        "D" => Ok(Drive::D),
+        _ => Err(format!("unknown drive '{s}' (use A, B, C or D)")),
+    }
+}
+
+fn parse_hex(s: &str) -> Result<u32, String> {
+    let t = s.trim();
+    let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    let t = t.strip_suffix(['h', 'H']).unwrap_or(t).replace('_', "");
+    u32::from_str_radix(&t, 16).map_err(|_| format!("'{s}' is not a hex number"))
+}
+
+fn parse_segment(s: &str, cpu: &Cpu) -> Result<u16, String> {
+    let idx = match s.trim().to_ascii_lowercase().as_str() {
+        "es" => Some(cpu::ES),
+        "cs" => Some(cpu::CS),
+        "ss" => Some(cpu::SS),
+        "ds" => Some(cpu::DS),
+        "fs" => Some(cpu::FS),
+        "gs" => Some(cpu::GS),
+        _ => None,
+    };
+    match idx {
+        Some(i) => Ok(cpu.sregs[i]),
+        None => {
+            let v = parse_hex(s)?;
+            u16::try_from(v).map_err(|_| format!("segment '{s}' is larger than FFFF"))
+        }
+    }
+}
+
+/// "SEG:OFF" (real-mode) or a linear hex address.
+fn parse_address(s: &str, cpu: &Cpu) -> Result<u32, String> {
+    match s.split_once(':') {
+        Some((seg, off)) => {
+            let seg = parse_segment(seg, cpu)? as u32;
+            Ok((seg << 4).wrapping_add(parse_hex(off)?))
+        }
+        None => parse_hex(s),
+    }
+}
+
+fn parse_bytes(s: &str) -> Result<Vec<u8>, String> {
+    let digits: String = s.chars().filter(|c| !c.is_whitespace() && *c != ',').collect();
+    let digits = digits.replace("0x", "");
+    if digits.len() % 2 != 0 {
+        return Err("hex byte string has an odd number of digits".into());
+    }
+    (0..digits.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&digits[i..i + 2], 16).map_err(|_| format!("bad hex '{}'", &digits[i..i + 2])))
+        .collect()
+}
+
+fn set_register(c: &mut Cpu, name: &str, v: u32) -> Result<(), String> {
+    let n = name.trim().to_ascii_lowercase();
+    let gpr = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
+    let gpr16 = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"];
+    let r8 = ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"];
+    let segs = ["es", "cs", "ss", "ds", "fs", "gs"];
+    if let Some(i) = gpr.iter().position(|r| *r == n) {
+        c.regs[i] = v;
+    } else if let Some(i) = gpr16.iter().position(|r| *r == n) {
+        c.regs[i] = (c.regs[i] & 0xFFFF_0000) | (v & 0xFFFF);
+    } else if let Some(i) = r8.iter().position(|r| *r == n) {
+        let (reg, shift) = if i < 4 { (i, 0) } else { (i - 4, 8) };
+        c.regs[reg] = (c.regs[reg] & !(0xFF << shift)) | (v & 0xFF) << shift;
+    } else if let Some(i) = segs.iter().position(|r| *r == n) {
+        c.set_segment(i, v as u16);
+    } else {
+        match n.as_str() {
+            "eip" => c.eip = v,
+            "ip" => c.eip = v & 0xFFFF,
+            "eflags" | "flags" => c.eflags = (v & 0x0027_7FD5) | 2,
+            "cr0" => c.cr0 = v | 0x10,
+            _ => return Err(format!("unknown register '{name}'")),
+        }
+    }
+    c.halted = false;
+    Ok(())
+}
+
+fn hex_dump(start: u32, bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (i, chunk) in bytes.chunks(16).enumerate() {
+        let addr = start.wrapping_add(i as u32 * 16);
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
+        let ascii: String = chunk
+            .iter()
+            .map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { '.' })
+            .collect();
+        out.push_str(&format!("{addr:05X}  {:<47}  {ascii}\n", hex.join(" ")));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_addresses() {
+        let mut cpu = Cpu::new();
+        cpu.set_segment(cpu::DS, 0x1234);
+        assert_eq!(parse_address("B800:0010", &cpu), Ok(0xB8010));
+        assert_eq!(parse_address("ds:0004", &cpu), Ok(0x12344));
+        assert_eq!(parse_address("0xB8000", &cpu), Ok(0xB8000));
+        assert_eq!(parse_address("7C00h", &cpu), Ok(0x7C00));
+        assert!(parse_address("xyz", &cpu).is_err());
+    }
+
+    #[test]
+    fn parses_bytes() {
+        assert_eq!(parse_bytes("B8 00 4C, cd21"), Ok(vec![0xB8, 0x00, 0x4C, 0xCD, 0x21]));
+        assert!(parse_bytes("ABC").is_err());
+    }
+
+    #[test]
+    fn sets_partial_registers() {
+        let mut cpu = Cpu::new();
+        cpu.regs[cpu::EAX] = 0x1122_3344;
+        set_register(&mut cpu, "ah", 0xAA).unwrap();
+        assert_eq!(cpu.regs[cpu::EAX], 0x1122_AA44);
+        set_register(&mut cpu, "ax", 0xBEEF).unwrap();
+        assert_eq!(cpu.regs[cpu::EAX], 0x1122_BEEF);
+    }
+}

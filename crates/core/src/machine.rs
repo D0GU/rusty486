@@ -1,7 +1,9 @@
 //! The complete rusty486 machine: CPU + memory + devices.
 
+use std::collections::BTreeSet;
+
 use crate::bus::Bus;
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, CS};
 use crate::devices::disk::{self, DiskController, DiskImage};
 use crate::devices::video::{self, Video};
 
@@ -108,6 +110,19 @@ pub struct Machine {
     pub bus: PcBus,
     /// Emulated clock speed in Hz, used by frontends to pace execution.
     pub clock_hz: u64,
+    /// Linear addresses where execution stops (checked before each instruction).
+    pub breakpoints: BTreeSet<u32>,
+}
+
+/// Why `run_cycles` returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunResult {
+    /// The cycle budget was used up.
+    Completed,
+    /// The next instruction is at a breakpoint (linear address).
+    Breakpoint(u32),
+    /// The CPU triple-faulted and needs a reset.
+    Shutdown,
 }
 
 impl Machine {
@@ -116,7 +131,18 @@ impl Machine {
             cpu: Cpu::new(),
             bus: PcBus::new(bios),
             clock_hz: 33_000_000,
+            breakpoints: BTreeSet::new(),
         }
+    }
+
+    /// Linear address of the next instruction (CS base + EIP).
+    pub fn pc(&self) -> u32 {
+        self.cpu.seg_base[CS].wrapping_add(self.cpu.eip)
+    }
+
+    /// Execute exactly one instruction (or interrupt delivery).
+    pub fn step(&mut self) {
+        self.cpu.step(&mut self.bus);
     }
 
     pub fn insert_disk(&mut self, drive: Drive, image: DiskImage) {
@@ -137,17 +163,30 @@ impl Machine {
         self.bus.a20 = true;
     }
 
-    /// Run until at least `cycles` more clock cycles have elapsed.
-    pub fn run_cycles(&mut self, cycles: u64) {
+    /// Run until at least `cycles` more clock cycles have elapsed, or until
+    /// execution reaches a breakpoint. The instruction at the current PC
+    /// always executes first, so resuming from a breakpoint makes progress.
+    pub fn run_cycles(&mut self, cycles: u64) -> RunResult {
         let end = self.cpu.cycles + cycles;
         while self.cpu.cycles < end {
+            if self.cpu.shutdown {
+                self.cpu.cycles = end;
+                return RunResult::Shutdown;
+            }
             if self.cpu.halted && self.cpu.eflags & crate::cpu::flags::IF == 0 {
                 // Halted with interrupts off: nothing can wake us. Skip ahead.
                 self.cpu.cycles = end;
                 break;
             }
             self.cpu.step(&mut self.bus);
+            if !self.breakpoints.is_empty() && !self.cpu.halted {
+                let pc = self.pc();
+                if self.breakpoints.contains(&pc) {
+                    return RunResult::Breakpoint(pc);
+                }
+            }
         }
+        RunResult::Completed
     }
 
     /// The 80x25 text buffer: (character, attribute) byte pairs.

@@ -238,6 +238,11 @@ impl Cpu {
         Ok(())
     }
 
+    /// Load a segment register (real-mode semantics: base = selector * 16).
+    pub fn set_segment(&mut self, seg: usize, sel: u16) {
+        self.load_seg_real(seg, sel);
+    }
+
     pub(crate) fn load_seg_real(&mut self, seg: usize, sel: u16) {
         self.sregs[seg] = sel;
         self.seg_base[seg] = (sel as u32) << 4;
