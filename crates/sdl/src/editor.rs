@@ -761,9 +761,7 @@ impl Editor {
             let col = VIEW_LEFT + self.cur.col - self.left;
             Some((row * COLS + col, if self.overwrite { (0, 15) } else { (13, 14) }))
         } else {
-            let msg = "Coming in a later milestone.";
-            g.puts((COLS - msg.len()) / 2, 11, msg, attr(LIGHT_GRAY, BLUE));
-            None
+            None // the tab's own content is drawn by tabs::draw
         };
 
         // Status line.

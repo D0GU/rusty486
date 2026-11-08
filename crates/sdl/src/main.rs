@@ -19,6 +19,7 @@ mod keymap;
 mod mcp;
 mod project;
 mod screen;
+mod tabs;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -173,6 +174,12 @@ fn run(args: Args) -> Result<(), String> {
         let row = ((y.max(0) as u32 * SCREEN_H / VIEW_H) / 16).min(24) as usize;
         (col, row)
     };
+    // Mouse position (logical pixels) -> 640x400 frame pixel.
+    let pixel = |x: i32, y: i32| {
+        let px = (x.max(0) as u32).min(639) as usize;
+        let py = ((y.max(0) as u32) * SCREEN_H / VIEW_H).min(399) as usize;
+        (px, py)
+    };
 
     'main: loop {
         for event in events.poll_iter() {
@@ -207,6 +214,11 @@ fn run(args: Args) -> Result<(), String> {
                         }
                         (View::Editor, Some(key)) => {
                             let action = emu.editor.key(key, keymod, &clipboard);
+                            if action == Action::None {
+                                if let Some(w) = emu.which_tab() {
+                                    tabs::key(w, &mut emu, key, keymod);
+                                }
+                            }
                             handle_action(&mut emu, action);
                         }
                         _ => {}
@@ -232,16 +244,35 @@ fn run(args: Args) -> Result<(), String> {
                     emu.machine.mouse_buttons(mouse_buttons);
                 }
                 Event::TextInput { text, .. } if emu.view == View::Editor => {
-                    emu.editor.text_input(&text);
+                    match emu.which_tab() {
+                        Some(w) => tabs::text(w, &mut emu, &text),
+                        None => emu.editor.text_input(&text),
+                    }
                 }
-                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if emu.view == View::Editor => {
+                Event::MouseButtonDown { mouse_btn, x, y, .. } if emu.view == View::Editor => {
                     let (col, row) = cell(x, y);
-                    let shift = sdl.keyboard().mod_state().intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                    emu.editor.mouse_down(col, row, shift);
+                    match emu.which_tab() {
+                        Some(w) if row > 0 => {
+                            let (px, py) = pixel(x, y);
+                            tabs::mouse(w, &mut emu, px, py, mouse_btn == MouseButton::Left);
+                        }
+                        _ if mouse_btn == MouseButton::Left => {
+                            let shift = sdl.keyboard().mod_state().intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                            emu.editor.mouse_down(col, row, shift);
+                        }
+                        _ => {}
+                    }
                 }
-                Event::MouseMotion { x, y, .. } if emu.view == View::Editor => {
+                Event::MouseMotion { x, y, mousestate, .. } if emu.view == View::Editor => {
                     let (col, row) = cell(x, y);
-                    emu.editor.mouse_drag(col, row);
+                    match emu.which_tab() {
+                        Some(w) if mousestate.left() && row > 0 => {
+                            let (px, py) = pixel(x, y);
+                            tabs::mouse(w, &mut emu, px, py, true);
+                        }
+                        Some(_) => {}
+                        None => emu.editor.mouse_drag(col, row),
+                    }
                 }
                 Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } => emu.editor.mouse_up(),
                 Event::MouseWheel { y, .. } if emu.view == View::Editor => emu.editor.wheel(y),
@@ -268,7 +299,13 @@ fn run(args: Args) -> Result<(), String> {
         let dt = now.duration_since(last).min(Duration::from_millis(100));
         last = now;
         emu.run((dt.as_secs_f64() * emu.machine.clock_hz as f64) as u64);
-        let samples = emu.machine.take_audio();
+        let mut samples = emu.machine.take_audio();
+        if emu.view == View::Editor && emu.which_tab() == Some(tabs::Which::Sound) {
+            if samples.is_empty() {
+                samples = vec![0; (dt.as_secs_f64() * 44_100.0) as usize];
+            }
+            emu.tabs.sound.render(&mut samples);
+        }
         if let Some(q) = &audio_queue {
             // Keep latency bounded: drop audio if more than ~200 ms is queued.
             if q.size() < 44_100 * 2 / 5 && !emu.paused {
@@ -335,6 +372,11 @@ fn handle_action(emu: &mut Emu, action: Action) {
     match action {
         Action::None => {}
         Action::Machine => emu.view = View::Machine,
+        Action::Save if emu.which_tab().is_some() => {
+            let dir = emu.project.dir.clone();
+            let msg = emu.tabs.save(&dir);
+            emu.editor.set_status(msg, Level::Info);
+        }
         Action::Save => match emu.editor.save() {
             Ok(()) => emu.editor.set_status(format!("Saved {}", emu.editor.path.display()), Level::Info),
             Err(e) => emu.editor.set_status(format!("Cannot save: {e}"), Level::Error),

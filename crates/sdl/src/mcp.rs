@@ -209,7 +209,7 @@ pub struct ScreenshotArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ViewArgs {
-    /// "machine" or "editor".
+    /// "machine", "editor", or an editor tab: "code", "sprites", "map", "sound", "disks".
     pub view: String,
 }
 
@@ -897,14 +897,27 @@ impl Rusty486Mcp {
         self.try_with(|emu| Ok(Value::String(emu.machine.screen_text()))).await
     }
 
-    #[tool(description = "Switch the rusty486 window between the machine display and the editor.")]
+    #[tool(description = "Switch the rusty486 window to the machine display, the editor, or a         specific editor tab (code, sprites, map, sound, disks).")]
     async fn set_view(&self, Parameters(a): Parameters<ViewArgs>) -> Result<CallToolResult, McpError> {
         self.try_with(move |emu| {
-            emu.view = match a.view.as_str() {
-                "editor" => View::Editor,
-                "machine" => View::Machine,
-                other => return Err(format!("unknown view '{other}' (use machine or editor)")),
+            use crate::editor::Tab;
+            let tab = match a.view.as_str() {
+                "machine" => {
+                    emu.view = View::Machine;
+                    return Ok(json!({ "view": "machine" }));
+                }
+                "editor" => None,
+                "code" => Some(Tab::Code),
+                "sprites" => Some(Tab::Sprites),
+                "map" => Some(Tab::Map),
+                "sound" => Some(Tab::Sound),
+                "disks" => Some(Tab::Disks),
+                other => return Err(format!("unknown view '{other}' (machine, editor, code, sprites, map, sound, disks)")),
             };
+            emu.view = View::Editor;
+            if let Some(t) = tab {
+                emu.editor.tab = t;
+            }
             Ok(json!({ "view": a.view }))
         })
         .await

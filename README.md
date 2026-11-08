@@ -61,6 +61,13 @@ auto-init DMA, IRQ 5), an 8237 DMA controller, the PC speaker, and a
 44.1 kHz mixer played through SDL (`--mute` to silence). TinyDOS sets
 `BLASTER=A220 I5 D1 T3`.
 
+**Milestone 9, done:** the editor's asset tabs. **Sprites** (64 16x16
+sprites with the 256-colour palette, `data\SPRITES.BIN`), **Map** (64x32 tile
+map painted with the sprites, `data\MAP.BIN`), **Sound** (16 OPL2 instruments
+with a live keyboard piano, `data\INSTR.BIN`) and **Disks** (drive manager:
+browse and delete files on mounted images, new TinyDOS floppies, insert,
+eject, save). Everything in `data\` is copied onto the program's disk.
+
 ## Roadmap
 
 1. ~~Real-mode boot to text~~
@@ -71,7 +78,7 @@ auto-init DMA, IRQ 5), an 8237 DMA controller, the PC speaker, and a
 6. ~~Protected mode and paging~~
 7. ~~VBE graphics~~
 8. ~~OPL2 + Sound Blaster + PC speaker~~
-9. Sprite, map, sound and disk editors
+9. ~~Sprite, map, sound and disk editors~~
 10. A Borland-style IDE and compiler for a Rust subset, running inside TinyDOS
 
 ## Building

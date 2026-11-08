@@ -9,6 +9,7 @@ use rusty486_asm::AsmError;
 use rusty486_core::devices::input::shift;
 
 use crate::keymap::{KeyState, PcKey};
+use crate::tabs::{self, Tabs};
 use rusty486_core::devices::disk::DiskImage;
 use rusty486_core::machine::{Drive, RunResult};
 use rusty486_core::Machine;
@@ -65,11 +66,15 @@ pub struct Emu {
     pub keys: KeyState,
     /// Keystrokes queued by MCP `type_text`: (key, needs shift).
     pub typing: VecDeque<(PcKey, bool)>,
+    /// Sprite, map, sound and disk tabs.
+    pub tabs: Tabs,
 }
 
 impl Emu {
     pub fn new(machine: Machine, project: Project, editor: Editor) -> Self {
+        let tabs = Tabs::load(&project.dir);
         Emu {
+            tabs,
             machine,
             screen: Screen::new(),
             paused: false,
@@ -85,6 +90,18 @@ impl Emu {
             last_build: None,
             keys: KeyState::default(),
             typing: VecDeque::new(),
+        }
+    }
+
+    /// The asset tab shown in the editor, if it isn't the code tab.
+    pub fn which_tab(&self) -> Option<tabs::Which> {
+        use crate::editor::Tab;
+        match self.editor.tab {
+            Tab::Code => None,
+            Tab::Sprites => Some(tabs::Which::Sprites),
+            Tab::Map => Some(tabs::Which::Map),
+            Tab::Sound => Some(tabs::Which::Sound),
+            Tab::Disks => Some(tabs::Which::Disks),
         }
     }
 
@@ -129,7 +146,16 @@ impl Emu {
             View::Machine => self.screen.render(&self.machine, self.blink_on),
             View::Editor => {
                 let cursor = self.editor.draw(&mut self.editor_cells, &self.project.name);
+                let which = self.which_tab();
+                if let Some(w) = which {
+                    let mut cells = std::mem::take(&mut self.editor_cells);
+                    tabs::draw(w, self, &mut cells);
+                    self.editor_cells = cells;
+                }
                 self.screen.render_cells(&self.editor_cells, cursor, self.blink_on, false);
+                if let Some(w) = which {
+                    tabs::overlay(w, &self.tabs, &mut self.screen.pixels);
+                }
             }
         }
     }
