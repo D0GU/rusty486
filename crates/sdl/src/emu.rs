@@ -4,12 +4,30 @@
 
 use std::path::PathBuf;
 
+use rusty486_asm::AsmError;
 use rusty486_core::devices::disk::DiskImage;
 use rusty486_core::machine::{Drive, RunResult};
 use rusty486_core::Machine;
 use tokio::sync::oneshot;
 
+use crate::editor::{self, Editor, Level};
+use crate::project::Project;
 use crate::screen::Screen;
+
+/// What the window shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Machine,
+    Editor,
+}
+
+/// Outcome of the last build, for status reports.
+#[derive(Clone, Debug, Default)]
+pub struct BuildSummary {
+    pub ok: bool,
+    pub bytes: usize,
+    pub errors: Vec<AsmError>,
+}
 
 /// A unit of work from another thread, run on the UI thread with full access.
 pub type Job = Box<dyn FnOnce(&mut Emu) + Send>;
@@ -34,10 +52,15 @@ pub struct Emu {
     pub log: String,
     pub waiters: Vec<Waiter>,
     pub blink_on: bool,
+    pub view: View,
+    pub project: Project,
+    pub editor: Editor,
+    editor_cells: Vec<u8>,
+    pub last_build: Option<BuildSummary>,
 }
 
 impl Emu {
-    pub fn new(machine: Machine) -> Self {
+    pub fn new(machine: Machine, project: Project, editor: Editor) -> Self {
         Emu {
             machine,
             screen: Screen::new(),
@@ -47,7 +70,65 @@ impl Emu {
             log: String::new(),
             waiters: Vec::new(),
             blink_on: true,
+            view: View::Machine,
+            project,
+            editor,
+            editor_cells: vec![0; editor::COLS * editor::ROWS * 2],
+            last_build: None,
         }
+    }
+
+    /// Draw the current view (or a specific one) into `self.screen`.
+    pub fn render(&mut self, view: View) {
+        match view {
+            View::Machine => self.screen.render(&self.machine, self.blink_on),
+            View::Editor => {
+                let cursor = self.editor.draw(&mut self.editor_cells, &self.project.name);
+                self.screen.render_cells(&self.editor_cells, cursor, self.blink_on, false);
+            }
+        }
+    }
+
+    /// Save the editor buffer and assemble it. Errors are shown in the editor.
+    pub fn build(&mut self) -> (BuildSummary, Option<Vec<u8>>) {
+        if self.editor.dirty {
+            if let Err(e) = self.editor.save() {
+                self.editor.set_status(format!("Cannot save: {e}"), Level::Error);
+            }
+        }
+        let build = self.project.build(&self.editor.text());
+        let summary = match &build.output {
+            Ok(out) => {
+                self.editor.clear_errors();
+                self.editor.set_status(
+                    format!("Built {} bytes -> {}", out.bytes.len(), self.project.disk_path().display()),
+                    Level::Info,
+                );
+                BuildSummary { ok: true, bytes: out.bytes.len(), errors: vec![] }
+            }
+            Err(errors) => {
+                self.editor.set_errors(errors);
+                BuildSummary { ok: false, bytes: 0, errors: errors.clone() }
+            }
+        };
+        self.last_build = Some(summary.clone());
+        (summary, build.disk)
+    }
+
+    /// Build, then boot the program's floppy in drive A. On errors, show the editor.
+    pub fn build_and_run(&mut self) -> BuildSummary {
+        let (summary, disk) = self.build();
+        match disk {
+            Some(disk) => {
+                let path = self.project.disk_path();
+                self.insert_disk(Drive::A, path, DiskImage::new(disk));
+                self.machine.reset();
+                self.resume();
+                self.view = View::Machine;
+            }
+            None => self.view = View::Editor,
+        }
+        summary
     }
 
     /// Advance emulation by `cycles` (unless paused), then service waiters.
@@ -106,7 +187,10 @@ impl Emu {
     }
 
     pub fn insert_disk(&mut self, drive: Drive, path: PathBuf, image: DiskImage) {
-        self.save_disk(drive).ok();
+        // Save the old disk only if it's a different file.
+        if self.disk_paths[drive as usize].as_ref() != Some(&path) {
+            self.save_disk(drive).ok();
+        }
         self.machine.insert_disk(drive, image);
         self.disk_paths[drive as usize] = Some(path);
     }

@@ -15,7 +15,7 @@ fn main() {
         println!("cargo:rustc-link-lib=advapi32");
     }
 
-    for name in ["bios", "hello"] {
+    for name in ["bios", "hello", "loader"] {
         let src = bios_dir.join(format!("{name}.asm"));
         println!("cargo:rerun-if-changed={}", src.display());
         let out = out_dir.join(format!("{name}.bin"));

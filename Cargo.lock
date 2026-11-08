@@ -821,6 +821,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rusty486-asm"
+version = "0.1.0"
+
+[[package]]
 name = "rusty486-core"
 version = "0.1.0"
 dependencies = [
@@ -837,6 +841,7 @@ dependencies = [
  "getrandom 0.3.4",
  "png",
  "rmcp",
+ "rusty486-asm",
  "rusty486-core",
  "schemars",
  "sdl2",

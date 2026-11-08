@@ -28,23 +28,40 @@ impl Screen {
         }
     }
 
-    /// Draw the 80x25 text buffer. `blink_on` drives cursor and attribute blink.
+    /// Draw the machine's 80x25 text buffer. `blink_on` drives cursor and
+    /// attribute blink.
     pub fn render(&mut self, machine: &Machine, blink_on: bool) {
-        let text = machine.text_buffer();
         let video = &machine.bus.video;
-        let cursor = video.cursor_offset() as usize;
-        let (cur_start, cur_end) = video.cursor_shape();
+        let cursor = video
+            .cursor_visible()
+            .then(|| (video.cursor_offset() as usize, video.cursor_shape()));
+        self.render_cells(machine.text_buffer(), cursor, blink_on, true);
+    }
 
+    /// Draw an 80x25 grid of (character, attribute) pairs. With `blink_attrs`,
+    /// attribute bit 7 blinks (VGA default); otherwise it selects bright
+    /// backgrounds, which the editor uses.
+    pub fn render_cells(
+        &mut self,
+        text: &[u8],
+        cursor: Option<(usize, (u8, u8))>,
+        blink_on: bool,
+        blink_attrs: bool,
+    ) {
+        let (cursor, (cur_start, cur_end)) = cursor.unwrap_or((usize::MAX, (0, 0)));
         for row in 0..TEXT_ROWS {
             for col in 0..TEXT_COLS {
                 let i = row * TEXT_COLS + col;
                 let (ch, attr) = (text[i * 2], text[i * 2 + 1]);
                 let fg = PALETTE[(attr & 0x0F) as usize];
-                let bg = PALETTE[((attr >> 4) & 0x07) as usize];
-                // Attribute bit 7 blinks the character.
-                let show_fg = attr & 0x80 == 0 || blink_on;
+                let bg = if blink_attrs {
+                    PALETTE[((attr >> 4) & 0x07) as usize]
+                } else {
+                    PALETTE[(attr >> 4) as usize]
+                };
+                let show_fg = !blink_attrs || attr & 0x80 == 0 || blink_on;
                 let glyph = &self.glyphs[ch as usize];
-                let show_cursor = i == cursor && blink_on && video.cursor_visible();
+                let show_cursor = i == cursor && blink_on;
 
                 for y in 0..16 {
                     let bits = if show_fg { glyph[y / 2] } else { 0 };

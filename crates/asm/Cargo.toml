@@ -1,0 +1,8 @@
+[package]
+name = "rusty486-asm"
+description = "NASM-syntax x86 (8086-486) assembler for rusty486. No host I/O, WASM-ready."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

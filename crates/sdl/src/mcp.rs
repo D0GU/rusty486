@@ -29,7 +29,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
-use crate::emu::{Emu, Job, Waiter};
+use crate::editor::Level;
+use crate::emu::{BuildSummary, Emu, Job, View, Waiter};
 
 pub const DEFAULT_PORT: u16 = 8486;
 
@@ -196,6 +197,38 @@ pub struct LoadFileArgs {
     pub jump: Option<bool>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ScreenshotArgs {
+    /// "machine" (default), "editor", or "current" (whatever the window shows).
+    pub view: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ViewArgs {
+    /// "machine" or "editor".
+    pub view: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SourceArgs {
+    /// Path relative to the project folder (default: the entry file, src/main.asm).
+    pub path: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct WriteSourceArgs {
+    /// Path relative to the project folder (default: the entry file, src/main.asm).
+    pub path: Option<String>,
+    /// The complete new file contents.
+    pub content: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct AssembleArgs {
+    /// NASM-syntax source to assemble. Defaults to the editor's current buffer.
+    pub source: Option<String>,
+}
+
 // ------------------------------------------------------------------ server
 
 #[derive(Clone)]
@@ -206,7 +239,7 @@ pub struct Rusty486Mcp {
 
 impl Rusty486Mcp {
     fn new(jobs: Sender<Job>) -> Self {
-        Rusty486Mcp { tool_router: Self::tool_router(), jobs }
+        Rusty486Mcp { tool_router: Self::tool_router() + Self::project_router(), jobs }
     }
 
     /// Run `f` on the UI thread and return its result.
@@ -251,11 +284,23 @@ impl Rusty486Mcp {
         self.try_with(|emu| Ok(status_json(emu))).await
     }
 
-    #[tool(description = "Capture the screen as a PNG image (640x400, 80x25 text mode).")]
-    async fn screenshot(&self) -> Result<CallToolResult, McpError> {
+    #[tool(description = "Capture the screen as a PNG image (640x400, 80x25 text mode). By \
+        default this is the emulated machine's display; view=\"editor\" shows the built-in editor.")]
+    async fn screenshot(
+        &self,
+        Parameters(a): Parameters<ScreenshotArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let png = self
-            .with(|emu| {
-                emu.screen.render(&emu.machine, true);
+            .with(move |emu| {
+                let view = match a.view.as_deref() {
+                    Some("editor") => View::Editor,
+                    Some("current") => emu.view,
+                    _ => View::Machine,
+                };
+                let blink = emu.blink_on;
+                emu.blink_on = true;
+                emu.render(view);
+                emu.blink_on = blink;
                 emu.screen.png()
             })
             .await?;
@@ -534,17 +579,152 @@ impl Rusty486Mcp {
     }
 }
 
+#[tool_router(router = project_router)]
+impl Rusty486Mcp {
+    #[tool(description = "The open project: folder, entry file, source files, whether the editor \
+        has unsaved changes, and the last build result.")]
+    async fn project_info(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| {
+            Ok(json!({
+                "name": emu.project.name,
+                "folder": emu.project.dir.display().to_string(),
+                "entry": emu.project.entry,
+                "sources": emu.project.sources(),
+                "editor_file": emu.editor.path.display().to_string(),
+                "editor_unsaved_changes": emu.editor.dirty,
+                "view": if emu.view == View::Editor { "editor" } else { "machine" },
+                "last_build": emu.last_build.as_ref().map(build_json),
+                "notes": "Programs are flat binaries with 'org 0x100', loaded at 1000:0100 \
+                          (CS=DS=ES=SS=1000h) from a boot floppy built into build/disk.img. \
+                          Files can also be edited directly on disk; the editor reloads them.",
+            }))
+        })
+        .await
+    }
+
+    #[tool(description = "Read a project source file. For the file open in the editor, this \
+        returns the editor's buffer (including unsaved changes).")]
+    async fn read_source(&self, Parameters(a): Parameters<SourceArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let path = match &a.path {
+                Some(p) => emu.project.resolve(p)?,
+                None => emu.project.entry_path(),
+            };
+            if path == emu.editor.path {
+                return Ok(Value::String(emu.editor.text()));
+            }
+            std::fs::read_to_string(&path).map(Value::String).map_err(|e| format!("{}: {e}", path.display()))
+        })
+        .await
+    }
+
+    #[tool(description = "Replace a project source file's contents and save it. If it's the \
+        file open in the editor, the editor shows the new text (undoable with Ctrl+Z).")]
+    async fn write_source(
+        &self,
+        Parameters(a): Parameters<WriteSourceArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let path = match &a.path {
+                Some(p) => emu.project.resolve(p)?,
+                None => emu.project.entry_path(),
+            };
+            if path == emu.editor.path {
+                emu.editor.set_text(&a.content);
+                emu.editor.save().map_err(|e| e.to_string())?;
+                emu.editor.set_status("Updated via MCP", Level::Info);
+            } else {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&path, &a.content).map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            Ok(json!({ "written": path.display().to_string(), "bytes": a.content.len() }))
+        })
+        .await
+    }
+
+    #[tool(description = "Assemble NASM-syntax source with rusty486's built-in assembler without \
+        running it. Returns errors with line numbers, or the size, symbols and a hex dump.")]
+    async fn assemble(&self, Parameters(a): Parameters<AssembleArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let src = a.source.unwrap_or_else(|| emu.editor.text());
+            Ok(match rusty486_asm::assemble(&src) {
+                Ok(out) => json!({
+                    "ok": true,
+                    "origin": format!("{:X}", out.origin),
+                    "bytes": out.bytes.len(),
+                    "symbols": out.symbols.iter().map(|(k, v)| (k.clone(), json!(format!("{v:X}")))).collect::<serde_json::Map<_, _>>(),
+                    "hex": hex_dump(out.origin, &out.bytes[..out.bytes.len().min(512)]),
+                }),
+                Err(errors) => json!({
+                    "ok": false,
+                    "errors": errors.iter().map(|e| json!({ "line": e.line, "message": e.message })).collect::<Vec<_>>(),
+                }),
+            })
+        })
+        .await
+    }
+
+    #[tool(description = "Save and assemble the project's entry file (the editor buffer) into \
+        build/main.bin and build/disk.img, without running it. Errors are also shown in the editor.")]
+    async fn build(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| {
+            emu.editor.check_disk();
+            let (summary, _) = emu.build();
+            Ok(build_json(&summary))
+        })
+        .await
+    }
+
+    #[tool(description = "Like Ctrl+F9 in the editor: save, assemble, write the boot floppy to \
+        drive A, reset the machine and run the program. On errors the editor is shown instead. \
+        Follow with `run` and `screen_text`/`screenshot` to see the result.")]
+    async fn build_and_run(&self) -> Result<CallToolResult, McpError> {
+        self.try_with(|emu| {
+            emu.editor.check_disk();
+            let summary = emu.build_and_run();
+            let mut v = build_json(&summary);
+            v["status"] = status_json(emu);
+            Ok(v)
+        })
+        .await
+    }
+
+    #[tool(description = "Switch the rusty486 window between the machine display and the editor.")]
+    async fn set_view(&self, Parameters(a): Parameters<ViewArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            emu.view = match a.view.as_str() {
+                "editor" => View::Editor,
+                "machine" => View::Machine,
+                other => return Err(format!("unknown view '{other}' (use machine or editor)")),
+            };
+            Ok(json!({ "view": a.view }))
+        })
+        .await
+    }
+}
+
+fn build_json(b: &BuildSummary) -> Value {
+    json!({
+        "ok": b.ok,
+        "bytes": b.bytes,
+        "errors": b.errors.iter().map(|e| json!({ "line": e.line, "message": e.message })).collect::<Vec<_>>(),
+    })
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Rusty486Mcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "rusty486 is a fantasy 486 PC emulator: an i486 CPU in real mode with a PC-style \
-             BIOS and 80x25 colour text mode. These tools control the live machine shown in the \
-             rusty486 window. Addresses are hex: 'SEG:OFF' (e.g. 'B800:0000', 'cs:0100') or \
-             linear ('B8000'). Typical loop: write code, assemble it with `nasm -f bin`, put it \
-             on a disk image or load it with load_file, then run/step and inspect with \
-             screen_text, screenshot, get_registers and read_memory. Programs can log text by \
-             writing bytes to port E9h (see debug_log).",
+             BIOS and 80x25 colour text mode, plus a built-in DOS-style editor and NASM-syntax \
+             assembler. These tools control the live machine shown in the rusty486 window. \
+             Addresses are hex: 'SEG:OFF' (e.g. 'B800:0000', 'cs:0100') or linear ('B8000'). \
+             Typical loop: project_info, then read_source/write_source (or edit the project's \
+             files directly), build_and_run, then run and inspect with screen_text, screenshot, \
+             get_registers, read_memory and breakpoints. Programs use 'org 0x100' and are loaded \
+             at 1000:0100. They can log text by writing bytes to port E9h (see debug_log).",
         )
     }
 }

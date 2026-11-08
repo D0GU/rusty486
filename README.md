@@ -19,11 +19,22 @@ built-in editor and an MCP server so Claude Code can drive the machine.
 
 **Milestone 2, done:** MCP server, so Claude Code can see and drive the running machine.
 
+**Milestone 3, done:** DOS-style code editor with a built-in NASM-syntax assembler.
+
+- `rusty486-asm`: assembles the full 486 integer instruction set, `%define`,
+  `%macro`, `%rep`, `times`, local labels and `$`/`$$` expressions. Its output
+  is byte-identical to NASM for the BIOS and an ~450-form coverage file.
+- Editor: press **Esc** to switch between the machine and the editor. Grey
+  menu bar, blue editing window, syntax highlighting, mouse and keyboard
+  selection, clipboard, undo, and inline error highlighting. F2 saves, F9
+  builds, **Ctrl+F9** (or Ctrl+R) builds and runs. It reloads files changed on
+  disk by other programs.
+
 ## Roadmap
 
 1. ~~Real-mode boot to text~~
 2. ~~MCP server (local HTTP + token) so Claude Code can drive the machine~~
-3. Code editor with a built-in NASM-syntax assembler
+3. ~~Code editor with a built-in NASM-syntax assembler~~
 4. Protected mode and paging, VBE graphics, mini-DOS, sprite/map/sound editors,
    OPL2 + Sound Blaster, and a drive manager
 
@@ -37,9 +48,25 @@ cargo run --release -p rusty486-sdl                     # boots the built-in dem
 cargo run --release -p rusty486-sdl -- --fda disk.img   # boot your own image
 ```
 
-Options: `--fda/--fdb/--hda/--hdb IMG`, `--mhz N`, `--mcp-port N`, `--no-mcp`.
-Keys: F11 resets, Pause pauses. Disk images the guest writes to are saved when
+Options: `--project DIR`, `--fda/--fdb/--hda/--hdb IMG`, `--mhz N`,
+`--mcp-port N`, `--no-mcp`. Keys: Esc toggles the editor, Ctrl+F9 builds and
+runs, F11 resets, Pause pauses. Disk images the guest writes to are saved when
 you close the window.
+
+## Projects
+
+A project is a folder (default `%USERPROFILE%\rusty486\default`, created on
+first run from a template):
+
+```text
+project.toml      name = "...", entry = "src/main.asm"
+src/main.asm      your program: org 0x100, loaded at 1000:0100 like a DOS .COM
+build/main.bin    the assembled program
+build/disk.img    a bootable 1.44 MB floppy: bios/loader.asm + the program
+```
+
+The assembler is also available on the command line:
+`cargo run -p rusty486-asm --example r486asm -- in.asm out.bin`.
 
 ## MCP server (Claude Code integration)
 
@@ -64,6 +91,9 @@ claude mcp add --scope user --transport http rusty486 http://127.0.0.1:8486/mcp 
 | `debug_log` | Text written to debug port E9h (the BIOS mirrors its output there) |
 | `disk_insert`, `disk_eject`, `disk_save`, `disk_list` | Mount raw `.img` files (can create blank ones) |
 | `load_file` | Copy a flat binary into memory and optionally jump to it |
+| `project_info`, `read_source`, `write_source` | The open project and its source files |
+| `assemble`, `build`, `build_and_run` | Built-in assembler; `build_and_run` is the editor's Ctrl+F9 |
+| `set_view` | Show the machine or the editor (`screenshot` takes `view` too) |
 
 Tool calls run on the UI thread between frames, so Claude and the window
 always see the same machine.
@@ -84,6 +114,7 @@ cargo test -p rusty486-core --release --test singlestep -- --nocapture
 | Path | What |
 |------|------|
 | `crates/core` | Emulator core: CPU, bus, devices. No host I/O (WASM-ready). |
+| `crates/asm` | NASM-syntax assembler. No host I/O (WASM-ready). |
 | `crates/sdl` | Desktop frontend (`rusty486` binary). |
 | `bios/` | BIOS and demo boot sector (NASM). |
 | `scripts/` | Helper scripts. |
