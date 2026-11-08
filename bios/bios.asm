@@ -189,17 +189,38 @@ start:
         ; Time of day from the real-time clock.
         call rtc_to_ticks
 
-        ; 486SX: no FPU, so make FPU instructions trap (#NM) for emulators.
+        ; FPU: the 486SX has none, so FPU instructions trap (#NM) for
+        ; emulators. The fantasy R1024 reports one in CPUID (EDX bit 0).
+        mov eax, 1
+        db 0x0F, 0xA2                   ; cpuid
+        test dl, 1
+        jnz .fpu
         mov eax, cr0
         or eax, 0x04                    ; CR0.EM
         and eax, ~0x02                  ; CR0.MP
         mov cr0, eax
+        jmp .fpu_done
+.fpu:   mov eax, cr0
+        and eax, ~0x0C                  ; clear EM and TS
+        or eax, 0x22                    ; MP, NE
+        mov cr0, eax
+        db 0xDB, 0xE3                   ; fninit
+        or word [BDA_EQUIP], 0x0002     ; math coprocessor installed
+.fpu_done:
 
         ; Video mode 3 (also clears the screen and homes the cursor).
         mov ax, 0x0003
         int 0x10
 
         mov si, banner
+        call print
+        mov eax, 1
+        db 0x0F, 0xA2                   ; cpuid
+        mov si, cpu_sx
+        test dl, 1
+        jz .cpu_name
+        mov si, cpu_r1024
+.cpu_name:
         call print
         ; Memory: 16 MB + 64 KB blocks above it (CMOS 34h/35h).
         mov al, 0x35
@@ -263,8 +284,9 @@ print_dec:
         pop eax
         ret
 
-banner  db 'rusty486 BIOS v0.1', 13, 10
-        db 'Intel 486SX-compatible CPU @ 33 MHz', 13, 10, 0
+banner  db 'rusty486 BIOS v0.1', 13, 10, 0
+cpu_sx  db 'Intel 486SX-compatible CPU', 13, 10, 0
+cpu_r1024 db 'rusty R1024 fantasy CPU with FPU, up to 1024 MHz', 13, 10, 0
 msg_mem db ' KB RAM OK', 13, 10, 13, 10, 0
 
 dummy_iret:

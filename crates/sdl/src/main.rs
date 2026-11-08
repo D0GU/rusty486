@@ -46,7 +46,7 @@ use settings::{Aspect, Effect, Menu, Settings, UI_H, UI_W};
 use rusty486_firmware::BIOS;
 
 const USAGE: &str = "usage: rusty486 [--project DIR] [--fda IMG] [--fdb IMG] [--hda IMG] [--hdb IMG] \
-                     [--mhz N] [--mcp-port N] [--no-mcp] [--mute] [IMG]";
+                     [--mhz N] [--cpu 486sx|r1024] [--mcp-port N] [--no-mcp] [--mute] [IMG]";
 
 /// Logical display width; the height depends on the aspect setting.
 const VIEW_W: u32 = SCREEN_W;
@@ -54,6 +54,7 @@ const VIEW_W: u32 = SCREEN_W;
 struct Args {
     disks: Vec<(Drive, PathBuf)>,
     mhz: Option<u64>,
+    cpu: Option<settings::CpuChoice>,
     mute: bool,
     mcp_port: Option<u16>,
     project: PathBuf,
@@ -63,6 +64,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         disks: Vec::new(),
         mhz: None,
+        cpu: None,
         mcp_port: Some(mcp::DEFAULT_PORT),
         project: project::default_dir(),
         mute: false,
@@ -75,6 +77,13 @@ fn parse_args() -> Result<Args, String> {
             "--fdb" => args.disks.push((Drive::B, value()?.into())),
             "--hda" => args.disks.push((Drive::C, value()?.into())),
             "--hdb" => args.disks.push((Drive::D, value()?.into())),
+            "--cpu" => {
+                args.cpu = Some(match value()?.to_ascii_lowercase().as_str() {
+                    "486sx" | "486" => settings::CpuChoice::I486Sx,
+                    "r1024" | "1024" => settings::CpuChoice::R1024,
+                    other => return Err(format!("--cpu: unknown CPU '{other}' (486sx or r1024)")),
+                })
+            }
             "--mhz" => args.mhz = Some(value()?.parse().map_err(|e| format!("--mhz: {e}"))?),
             "--mcp-port" => {
                 args.mcp_port = Some(value()?.parse().map_err(|e| format!("--mcp-port: {e}"))?)
@@ -138,6 +147,9 @@ fn run(args: Args) -> Result<(), String> {
     if let Some(mhz) = args.mhz {
         settings.mhz = mhz as u32;
     }
+    if let Some(cpu) = args.cpu {
+        settings.cpu = cpu;
+    }
     let mut machine = Machine::new(BIOS.to_vec());
     machine.clock_hz = settings.mhz as u64 * 1_000_000;
     let project = Project::open_or_create(&args.project)
@@ -147,6 +159,9 @@ fn run(args: Args) -> Result<(), String> {
     println!("Project: {} ({})", project.name, project.dir.display());
     machine.set_time(chrono::Local::now().naive_local().and_utc().timestamp());
     let mut emu = Emu::new(machine, project, editor);
+    let s = settings.clone();
+    emu.apply_cpu(&s);
+    emu.machine.reset();
     emu.settings = settings;
 
     if !args.disks.iter().any(|(d, _)| *d == Drive::C) {
@@ -419,7 +434,11 @@ fn run(args: Args) -> Result<(), String> {
         let dt = now.duration_since(last).min(Duration::from_millis(100));
         last = now;
         if !(emu.menu_open() && emu.settings.pause_in_menu) {
-            emu.run((dt.as_secs_f64() * emu.machine.clock_hz as f64) as u64);
+            if emu.turbo() {
+                emu.run_turbo(dt);
+            } else {
+                emu.run((dt.as_secs_f64() * emu.machine.clock_hz as f64) as u64);
+            }
         }
         let mut samples = emu.machine.take_audio();
         if emu.view == View::Editor && emu.which_tab() == Some(tabs::Which::Sound) {

@@ -40,6 +40,8 @@ pub struct PcBus {
     pub audio: Audio,
     /// Next CPU cycle at which to bring the audio up to date.
     audio_due: u64,
+    /// Next CPU cycle at which `tick` has work to do (a timer edge or audio).
+    next_tick: u64,
     /// Bytes written to the debug port since the frontend last drained it.
     pub debug_out: Vec<u8>,
     /// Last value written to a POST diagnostic port (80h or 190h).
@@ -71,6 +73,7 @@ impl PcBus {
             sb: SoundBlaster::default(),
             audio: Audio::default(),
             audio_due: 0,
+            next_tick: 0,
             debug_out: Vec::new(),
             post_code: 0,
             a20: true,
@@ -81,6 +84,11 @@ impl PcBus {
 
     /// Advance time-based devices to CPU cycle `now`.
     pub fn tick(&mut self, now: u64) {
+        // Called after every instruction: skip the work until a device
+        // needs attention. I/O accesses sync first (see `Bus::sync`).
+        if now < self.next_tick {
+            return;
+        }
         let delta = now.saturating_sub(self.now);
         self.now = now;
         if delta > 0 && self.pit.advance_cycles(delta, self.clock_hz) > 0 {
@@ -89,6 +97,15 @@ impl PcBus {
         if now >= self.audio_due {
             self.audio_catch_up();
         }
+        let audio = self.audio_due.saturating_sub(now);
+        let next = self.pit.cycles_to_irq0(self.clock_hz).map_or(audio, |p| p.min(audio));
+        self.next_tick = now + next.max(1);
+    }
+
+    /// Force the next `tick` to do its work (after a device was reprogrammed
+    /// or the clock rate changed).
+    pub fn invalidate_tick(&mut self) {
+        self.next_tick = 0;
     }
 
     /// Generate audio (and run Sound Blaster DMA) up to the current cycle.
@@ -147,6 +164,14 @@ impl PcBus {
         }
     }
 
+    /// Whether `n` bytes at `addr` are ordinary RAM (no ROM, video memory or
+    /// wrap-around): conventional memory or extended memory.
+    #[inline]
+    fn plain_ram(addr: u32, n: u32, ram_len: usize) -> bool {
+        let end = addr as u64 + n as u64;
+        end <= 0xA0000 || (addr >= 0x10_0000 && end <= ram_len as u64)
+    }
+
     fn map(&self, addr: u32) -> u32 {
         if self.a20 {
             addr
@@ -156,9 +181,77 @@ impl PcBus {
     }
 }
 
+/// Where a block of physical memory lives, for bulk copies.
+#[derive(Clone, Copy)]
+enum Block {
+    Ram(usize),
+    Vram(usize),
+}
+
+impl PcBus {
+    fn block(&self, addr: u32, len: usize) -> Option<Block> {
+        if self.a20 && Self::plain_ram(addr, len as u32, self.ram.len()) && len <= u32::MAX as usize {
+            return Some(Block::Ram(addr as usize));
+        }
+        let lfb_end = video::LFB_BASE as u64 + video::VRAM_SIZE as u64;
+        if addr >= video::LFB_BASE && addr as u64 + len as u64 <= lfb_end {
+            return Some(Block::Vram((addr - video::LFB_BASE) as usize));
+        }
+        None
+    }
+}
+
 impl Bus for PcBus {
+    fn copy_block(&mut self, dst: u32, src: u32, len: usize) -> bool {
+        let (Some(d), Some(s)) = (self.block(dst, len), self.block(src, len)) else {
+            return false;
+        };
+        match (d, s) {
+            (Block::Ram(d), Block::Ram(s)) => {
+                if d < s + len && s < d + len {
+                    return false; // overlapping: REP MOVS semantics differ from memmove
+                }
+                self.ram.copy_within(s..s + len, d);
+            }
+            (Block::Vram(d), Block::Vram(s)) => {
+                if d < s + len && s < d + len {
+                    return false;
+                }
+                self.video.vram.copy_within(s..s + len, d);
+            }
+            (Block::Vram(d), Block::Ram(s)) => self.video.vram[d..d + len].copy_from_slice(&self.ram[s..s + len]),
+            (Block::Ram(d), Block::Vram(s)) => self.ram[d..d + len].copy_from_slice(&self.video.vram[s..s + len]),
+        }
+        true
+    }
+
+    fn fill_block(&mut self, dst: u32, pattern: u32, step: usize, len: usize) -> bool {
+        let Some(d) = self.block(dst, len) else { return false };
+        let buf = match d {
+            Block::Ram(d) => &mut self.ram[d..d + len],
+            Block::Vram(d) => &mut self.video.vram[d..d + len],
+        };
+        let bytes = pattern.to_le_bytes();
+        if step == 1 {
+            buf.fill(bytes[0]);
+        } else {
+            for chunk in buf.chunks_exact_mut(step) {
+                chunk.copy_from_slice(&bytes[..step]);
+            }
+        }
+        true
+    }
+
+    fn sync(&mut self, now: u64) {
+        self.next_tick = 0;
+        self.tick(now);
+    }
+
     fn read8(&mut self, addr: u32) -> u8 {
         let addr = self.map(addr);
+        if addr < 0xA0000 || (addr >= 0x10_0000 && (addr as usize) < self.ram.len()) {
+            return self.ram[addr as usize]; // plain RAM: the common case
+        }
         if (BIOS_BASE..BIOS_BASE + BIOS_SIZE as u32).contains(&addr) {
             self.bios[(addr - BIOS_BASE) as usize]
         } else if (0xA0000..0xB0000).contains(&addr) && self.video.graphics() {
@@ -172,8 +265,49 @@ impl Bus for PcBus {
         }
     }
 
+    fn read16(&mut self, addr: u32) -> u16 {
+        if self.a20 && Self::plain_ram(addr, 2, self.ram.len()) {
+            let a = addr as usize;
+            return u16::from_le_bytes([self.ram[a], self.ram[a + 1]]);
+        }
+        u16::from_le_bytes([self.read8(addr), self.read8(addr.wrapping_add(1))])
+    }
+
+    fn read32(&mut self, addr: u32) -> u32 {
+        if self.a20 && Self::plain_ram(addr, 4, self.ram.len()) {
+            let a = addr as usize;
+            return u32::from_le_bytes(self.ram[a..a + 4].try_into().unwrap());
+        }
+        self.read16(addr) as u32 | (self.read16(addr.wrapping_add(2)) as u32) << 16
+    }
+
+    fn write16(&mut self, addr: u32, value: u16) {
+        if self.a20 && Self::plain_ram(addr, 2, self.ram.len()) {
+            let a = addr as usize;
+            self.ram[a..a + 2].copy_from_slice(&value.to_le_bytes());
+            return;
+        }
+        let [a, b] = value.to_le_bytes();
+        self.write8(addr, a);
+        self.write8(addr.wrapping_add(1), b);
+    }
+
+    fn write32(&mut self, addr: u32, value: u32) {
+        if self.a20 && Self::plain_ram(addr, 4, self.ram.len()) {
+            let a = addr as usize;
+            self.ram[a..a + 4].copy_from_slice(&value.to_le_bytes());
+            return;
+        }
+        self.write16(addr, value as u16);
+        self.write16(addr.wrapping_add(2), (value >> 16) as u16);
+    }
+
     fn write8(&mut self, addr: u32, value: u8) {
         let addr = self.map(addr);
+        if addr < 0xA0000 || (addr >= 0x10_0000 && (addr as usize) < self.ram.len()) {
+            self.ram[addr as usize] = value;
+            return;
+        }
         if (BIOS_BASE..BIOS_BASE + BIOS_SIZE as u32).contains(&addr) {
             return; // ROM
         }
@@ -230,6 +364,8 @@ impl Bus for PcBus {
     }
 
     fn io_write8(&mut self, port: u16, value: u8) {
+        // The write may reprogram a timer: recompute the next event.
+        self.next_tick = 0;
         match port {
             DEBUG_PORT => self.debug_out.push(value),
             0x80 | 0x190 => self.post_code = value,
@@ -383,7 +519,10 @@ impl Machine {
     /// execution reaches a breakpoint. The instruction at the current PC
     /// always executes first, so resuming from a breakpoint makes progress.
     pub fn run_cycles(&mut self, cycles: u64) -> RunResult {
-        self.bus.clock_hz = self.clock_hz;
+        if self.bus.clock_hz != self.clock_hz {
+            self.bus.clock_hz = self.clock_hz;
+            self.bus.invalidate_tick();
+        }
         let end = self.cpu.cycles + cycles;
         while self.cpu.cycles < end {
             if self.cpu.shutdown {

@@ -49,27 +49,35 @@ impl Cpu {
     /// LOCK is only valid on read-modify-write instructions with a memory
     /// destination; anything else raises #UD.
     fn check_lock<B: Bus>(&mut self, bus: &mut B, op: u8) -> R<()> {
-        let at = |cpu: &Cpu, bus: &mut B, n: u32| {
-            bus.read8(cpu.seg_base[CS].wrapping_add(cpu.eip.wrapping_add(n)))
+        // Peek at the next code bytes (through paging, without advancing EIP).
+        let at = |cpu: &mut Cpu, bus: &mut B, n: u32| -> R<u8> {
+            let lin = cpu.seg_base[CS].wrapping_add(cpu.eip.wrapping_add(n));
+            let phys = if cpu.cr0 & CR0_PG != 0 {
+                let user = cpu.cpl == 3;
+                cpu.translate(bus, lin, false, user)?
+            } else {
+                lin
+            };
+            Ok(bus.read8(phys))
         };
         let (modrm, ok) = match op {
-            0x00..=0x3F if op & 7 < 2 && op & 0x38 != 0x38 => (at(self, bus, 0), true),
+            0x00..=0x3F if op & 7 < 2 && op & 0x38 != 0x38 => (at(self, bus, 0)?, true),
             0x80..=0x83 => {
-                let m = at(self, bus, 0);
+                let m = at(self, bus, 0)?;
                 (m, (m >> 3) & 7 != 7)
             }
-            0x86 | 0x87 => (at(self, bus, 0), true),
+            0x86 | 0x87 => (at(self, bus, 0)?, true),
             0xF6 | 0xF7 => {
-                let m = at(self, bus, 0);
+                let m = at(self, bus, 0)?;
                 (m, matches!((m >> 3) & 7, 2 | 3))
             }
             0xFE | 0xFF => {
-                let m = at(self, bus, 0);
+                let m = at(self, bus, 0)?;
                 (m, (m >> 3) & 7 < 2)
             }
             0x0F => {
-                let op2 = at(self, bus, 0);
-                let m = at(self, bus, 1);
+                let op2 = at(self, bus, 0)?;
+                let m = at(self, bus, 1)?;
                 let ok = match op2 {
                     0xAB | 0xB3 | 0xBB | 0xB0 | 0xB1 | 0xC0 | 0xC1 => true,
                     0xBA => (m >> 3) & 7 >= 5,
@@ -520,6 +528,7 @@ impl Cpu {
                 let v = self.rd(bus, self.dseg(), off, 8)?;
                 self.set_reg(8, 0, v);
             }
+            0xD8..=0xDF if self.has_fpu() => self.fpu_exec(bus, op)?,
             0xD8..=0xDF => {
                 // FPU escape. The 486SX has no FPU: with EM or TS set this
                 // traps to #NM so software can emulate it; otherwise it's ignored.
@@ -656,6 +665,7 @@ impl Cpu {
     }
 
     pub(crate) fn io_in<B: Bus>(&mut self, bus: &mut B, port: u16, sz: u32) -> u32 {
+        bus.sync(self.cycles);
         match sz {
             8 => bus.io_read8(port) as u32,
             16 => bus.io_read16(port) as u32,
@@ -664,6 +674,7 @@ impl Cpu {
     }
 
     pub(crate) fn io_out<B: Bus>(&mut self, bus: &mut B, port: u16, sz: u32, v: u32) {
+        bus.sync(self.cycles);
         match sz {
             8 => bus.io_write8(port, v as u8),
             16 => bus.io_write16(port, v as u16),
@@ -787,12 +798,90 @@ impl Cpu {
 
     // ---------------------------------------------------------------- strings
 
+    /// Fast path for forward REP MOVS / REP STOS with 32-bit addressing:
+    /// whole runs within one page are checked and translated once, then
+    /// copied in bulk. Returns the number of elements done; anything unusual
+    /// (faults, overlap, page-crossing elements, device memory) is left to
+    /// the exact element-by-element path.
+    fn rep_fast<B: Bus>(&mut self, bus: &mut B, kind: Str, sz: u32, budget: u32) -> u32 {
+        let step = sz / 8;
+        let src_seg = self.dseg();
+        let user = self.cpl == 3;
+        let mut done = 0;
+        while done < budget {
+            let count = self.regs[ECX].min(budget - done);
+            if count == 0 {
+                break;
+            }
+            let di = self.regs[EDI];
+            let dst_lin = self.seg_base[ES].wrapping_add(di);
+            let mut n = count.min((0x1000 - (dst_lin & 0xFFF)) / step);
+            let si = self.regs[ESI];
+            let src_lin = self.seg_base[src_seg].wrapping_add(si);
+            if kind == Str::Movs {
+                n = n.min((0x1000 - (src_lin & 0xFFF)) / step);
+            }
+            if n == 0 {
+                break;
+            }
+            let bytes = n * step;
+            if self.check_access(ES, di, bytes, true).is_err() {
+                break;
+            }
+            let paging = self.cr0 & CR0_PG != 0;
+            let dst = if paging {
+                match self.translate(bus, dst_lin, true, user) {
+                    Ok(p) => p,
+                    Err(_) => break,
+                }
+            } else {
+                dst_lin
+            };
+            let ok = if kind == Str::Movs {
+                if self.check_access(src_seg, si, bytes, false).is_err() {
+                    break;
+                }
+                let src = if paging {
+                    match self.translate(bus, src_lin, false, user) {
+                        Ok(p) => p,
+                        Err(_) => break,
+                    }
+                } else {
+                    src_lin
+                };
+                bus.copy_block(dst, src, bytes as usize)
+            } else {
+                bus.fill_block(dst, self.reg(sz, EAX), step as usize, bytes as usize)
+            };
+            if !ok {
+                break;
+            }
+            if kind == Str::Movs {
+                self.regs[ESI] = si.wrapping_add(bytes);
+            }
+            self.regs[EDI] = di.wrapping_add(bytes);
+            self.regs[ECX] -= n;
+            self.cycles += 3 * n as u64;
+            done += n;
+        }
+        done
+    }
+
     fn string<B: Bus>(&mut self, bus: &mut B, kind: Str, sz: u32) -> R<()> {
         let asz = if self.a32 { 32 } else { 16 };
         let step = sz / 8;
         let delta = if self.flag(DF) { step.wrapping_neg() } else { step };
         let src_seg = self.dseg();
         let mut done = 0;
+
+        if self.rep != Rep::None && self.a32 && !self.flag(DF) && matches!(kind, Str::Movs | Str::Stos) {
+            done = self.rep_fast(bus, kind, sz, REP_BATCH * 16);
+            if done == REP_BATCH * 16 && self.regs[ECX] != 0 {
+                self.eip = self.start_eip; // more to do: let interrupts in first
+                return Ok(());
+            }
+            done = done.min(REP_BATCH - 1);
+        }
 
         loop {
             if self.rep != Rep::None {

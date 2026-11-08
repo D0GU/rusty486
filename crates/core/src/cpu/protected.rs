@@ -3,6 +3,7 @@
 //! system instructions.
 
 use super::flags::*;
+use super::task::{TaskKind, NT};
 use super::*;
 
 /// A segment descriptor as read from the GDT/LDT/IDT.
@@ -211,9 +212,26 @@ impl Cpu {
             self.eip = off;
             return Ok(());
         }
+        // Task switch: a TSS (types 1/9) or a task gate (type 5).
+        if !d.is_seg() && matches!(d.sys_type(), 1 | 9 | 5) {
+            if d.dpl() < self.cpl || d.dpl() < rpl {
+                return Err(gp(sel_err(sel)));
+            }
+            if !d.present() {
+                return Err(Fault(11, sel_err(sel)));
+            }
+            let (tsel, td) = if d.sys_type() == 5 {
+                let t = d.gate_sel();
+                (t, self.read_desc(bus, t)?.0)
+            } else {
+                (sel, d)
+            };
+            let kind = if call { TaskKind::Call } else { TaskKind::Jmp };
+            let eip = self.eip;
+            return self.task_switch(bus, tsel, &td, kind, eip, None);
+        }
         // Call gate (286: type 4, 386: type 12).
         if d.is_seg() || !matches!(d.sys_type(), 4 | 12) {
-            // Task gates and TSS jumps (task switching) aren't emulated.
             return Err(gp(sel_err(sel)));
         }
         if d.dpl() < self.cpl || d.dpl() < rpl {
@@ -391,6 +409,9 @@ impl Cpu {
 
     /// IRET (both modes).
     pub(crate) fn iret<B: Bus>(&mut self, bus: &mut B) -> R<()> {
+        if self.pe() && !self.vm() && self.eflags & NT != 0 {
+            return self.task_return(bus);
+        }
         let osz = self.osz();
         let n = osz / 8;
         let ip = self.stack_peek(bus, 0, osz)?;
@@ -491,8 +512,23 @@ impl Cpu {
         let hi = self.sys_read(bus, a.wrapping_add(4), 32)?;
         let g = Desc::from_raw(lo, hi);
         let ty = g.sys_type();
+        if !g.is_seg() && ty == 5 {
+            // Task gate: switch to the task, pushing any error code there.
+            if kind == IntKind::Software && g.dpl() < self.cpl {
+                return Err(gp(idt_err));
+            }
+            if !g.present() {
+                return Err(Fault(11, idt_err));
+            }
+            let t = g.gate_sel();
+            let (td, _) = self.read_desc(bus, t).map_err(|_| Fault(10, sel_err(t)))?;
+            let error = match kind {
+                IntKind::Exception(code) if matches!(vector, 8 | 10..=14 | 17) => Some(code),
+                _ => None,
+            };
+            return self.task_switch(bus, t, &td, TaskKind::Int, ret_eip, error);
+        }
         if g.is_seg() || !matches!(ty, 6 | 7 | 14 | 15) {
-            // Task gates (5) aren't emulated.
             return Err(gp(idt_err));
         }
         if kind == IntKind::Software && g.dpl() < self.cpl {

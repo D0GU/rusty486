@@ -422,13 +422,13 @@ vbe_modeinfo:
         je .m15
         cmp cl, 16
         je .m16
-        mov dword [es:di+0x1F], 0x08100808  ; R 8@16, G 8@8
+        mov dword [es:di+0x1F], 0x08081008  ; R 8@16, G 8@8 (size, position)
         mov dword [es:di+0x23], 0x18080008  ; B 8@0, reserved 8@24
         jmp .masks_done
 .m15:   mov dword [es:di+0x1F], 0x05050A05  ; R 5@10, G 5@5
         mov dword [es:di+0x23], 0x0F010005  ; B 5@0, reserved 1@15
         jmp .masks_done
-.m16:   mov dword [es:di+0x1F], 0x06050B05  ; R 5@11, G 6@5
+.m16:   mov dword [es:di+0x1F], 0x05060B05  ; R 5@11, G 6@5 (size, position)
         mov dword [es:di+0x23], 0x00000005  ; B 5@0
 .masks_done:
         mov dword [es:di+0x28], 0xE0000000 ; linear framebuffer

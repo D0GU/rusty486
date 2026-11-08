@@ -16,7 +16,14 @@ use rusty486_core::Machine;
 use tokio::sync::oneshot;
 
 use crate::editor::{self, Editor, Level};
-use crate::settings::{Effect, Menu, Settings};
+use crate::settings::{CpuChoice, Effect, Menu, Settings};
+use rusty486_core::cpu::CpuModel;
+use std::time::{Duration, Instant};
+
+/// The R1024's top clock speed.
+pub const TURBO_MAX_HZ: u64 = 1_024_000_000;
+/// The R1024's lowest clock speed (when the host can't keep up).
+const TURBO_MIN_HZ: u64 = 33_000_000;
 use crate::project::Project;
 use crate::screen::Screen;
 
@@ -224,6 +231,59 @@ impl Emu {
             None => self.view = View::Editor,
         }
         summary
+    }
+
+    /// Set the CPU model and clock from the settings (takes effect fully
+    /// after a reset, when the BIOS sees the new CPU).
+    pub fn apply_cpu(&mut self, s: &Settings) {
+        match s.cpu {
+            CpuChoice::I486Sx => {
+                self.machine.cpu.model = CpuModel::I486Sx;
+                self.machine.clock_hz = s.mhz as u64 * 1_000_000;
+            }
+            CpuChoice::R1024 => {
+                self.machine.cpu.model = CpuModel::R1024;
+                self.machine.clock_hz = self.machine.clock_hz.clamp(100_000_000, TURBO_MAX_HZ);
+            }
+        }
+    }
+
+    /// Whether the clock adapts to the host's speed (R1024 turbo).
+    pub fn turbo(&self) -> bool {
+        self.settings.cpu == CpuChoice::R1024
+    }
+
+    /// Turbo: emulate `dt` of real time, but spend at most about
+    /// three quarters of it doing so. The clock rate follows what the host
+    /// sustains, up to 1024 MHz, so emulated time keeps pace with real time.
+    pub fn run_turbo(&mut self, dt: Duration) {
+        let budget = dt.mul_f64(0.75).clamp(Duration::from_millis(4), Duration::from_millis(25));
+        let start = Instant::now();
+        let hz = self.machine.clock_hz;
+        let want = (dt.as_secs_f64() * hz as f64) as u64;
+        let chunk = (hz / 1000).max(10_000); // about 1 ms of emulated time
+        let c0 = self.machine.cpu.cycles;
+        let mut done = 0;
+        let mut behind = false;
+        while done < want && !self.paused {
+            self.run(chunk.min(want - done));
+            done = self.machine.cpu.cycles - c0;
+            if start.elapsed() >= budget {
+                behind = done < want;
+                break;
+            }
+        }
+        if self.paused || dt.is_zero() {
+            return;
+        }
+        let new = if behind {
+            // What the host managed per second of real time, smoothed.
+            let sustained = done as f64 / dt.as_secs_f64();
+            0.7 * hz as f64 + 0.3 * sustained
+        } else {
+            hz as f64 * 1.05
+        };
+        self.machine.clock_hz = (new as u64).clamp(TURBO_MIN_HZ, TURBO_MAX_HZ);
     }
 
     /// Advance emulation by `cycles` (unless paused), then service waiters.

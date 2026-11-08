@@ -347,19 +347,38 @@ impl Cpu {
     }
 
     fn cpuid(&mut self) {
+        let r1024 = self.model == CpuModel::R1024;
         match self.regs[EAX] {
             0 => {
                 self.regs[EAX] = 1;
-                // "GenuineIntel"
-                self.regs[EBX] = u32::from_le_bytes(*b"Genu");
-                self.regs[EDX] = u32::from_le_bytes(*b"ineI");
-                self.regs[ECX] = u32::from_le_bytes(*b"ntel");
+                // "GenuineIntel", or "RustyFantasy" for the R1024.
+                let v = if r1024 { b"RustyFantasy" } else { b"GenuineIntel" };
+                self.regs[EBX] = u32::from_le_bytes(v[0..4].try_into().unwrap());
+                self.regs[EDX] = u32::from_le_bytes(v[4..8].try_into().unwrap());
+                self.regs[ECX] = u32::from_le_bytes(v[8..12].try_into().unwrap());
             }
-            _ => {
-                self.regs[EAX] = 0x0422; // family 4, model 2 (486SX), stepping 2
+            0x8000_0000 if r1024 => {
+                self.regs[EAX] = 0x8000_0004;
                 self.regs[EBX] = 0;
                 self.regs[ECX] = 0;
-                self.regs[EDX] = 0; // no FPU (SX)
+                self.regs[EDX] = 0;
+            }
+            n @ 0x8000_0002..=0x8000_0004 if r1024 => {
+                // Brand string, 16 bytes per leaf.
+                let mut brand = [0u8; 48];
+                brand[..40].copy_from_slice(b"rusty R1024 fantasy CPU @ up to 1024 MHz");
+                let chunk = &brand[(n as usize - 0x8000_0002) * 16..][..16];
+                let w = |i: usize| u32::from_le_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
+                self.regs[EAX] = w(0);
+                self.regs[EBX] = w(1);
+                self.regs[ECX] = w(2);
+                self.regs[EDX] = w(3);
+            }
+            _ => {
+                self.regs[EAX] = self.model.signature();
+                self.regs[EBX] = 0;
+                self.regs[ECX] = 0;
+                self.regs[EDX] = r1024 as u32; // bit 0: FPU on chip
             }
         }
     }

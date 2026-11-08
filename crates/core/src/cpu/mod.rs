@@ -1,18 +1,42 @@
 //! The i486 CPU core: real mode, protected mode (segmentation, privilege
-//! levels, gates) and paging. Not emulated: task switching, virtual-8086
-//! mode and the FPU (this is a 486SX).
+//! levels, gates), paging and task switching. The default
+//! model is a 486SX with no FPU; the fantasy R1024 model adds an x87 FPU.
 
 mod alu;
 mod exec;
 mod exec0f;
+mod fpu;
 mod modrm;
 mod paging;
 mod protected;
+mod task;
 
 use crate::bus::Bus;
 
 pub use alu::flags;
+pub use fpu::Fpu;
 pub use protected::Desc;
+
+/// Which CPU the machine has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CpuModel {
+    /// Intel 486SX-compatible, no FPU (the default).
+    #[default]
+    I486Sx,
+    /// The fantasy "rusty R1024": a 486 with an x87 FPU, clocked up to
+    /// 1024 MHz (as fast as the host allows).
+    R1024,
+}
+
+impl CpuModel {
+    /// CPUID family/model/stepping (also the reset signature in EDX).
+    pub fn signature(self) -> u32 {
+        match self {
+            CpuModel::I486Sx => 0x0422,
+            CpuModel::R1024 => 0x0418, // family 4, model 1 (DX), stepping 8
+        }
+    }
+}
 
 // General register indices, in x86 encoding order.
 pub const EAX: usize = 0;
@@ -134,6 +158,10 @@ pub struct Cpu {
     /// Emulate i386 quirks where the 386 and 486 differ (POPAD with a
     /// 16-bit stack loads ESP's upper half on the 386).
     pub quirks_386: bool,
+    /// The CPU model (486SX or the fantasy R1024 with an FPU).
+    pub model: CpuModel,
+    /// The x87 register file (used only by models with an FPU).
+    pub fpu: Fpu,
     /// Failed interrupt deliveries: (vector, fault vector, error code).
     pub fault_log: Vec<(u8, u8, u32)>,
 
@@ -185,6 +213,8 @@ impl Cpu {
             popf_mask32: 0x7FD5 | 1 << 18 | 1 << 21,
             has_cpuid: true,
             quirks_386: false,
+            model: CpuModel::I486Sx,
+            fpu: Fpu::default(),
             fault_log: Vec::new(),
             tlb_tag: vec![0; paging::TLB_SIZE],
             tlb_data: vec![0; paging::TLB_SIZE],
@@ -204,7 +234,7 @@ impl Cpu {
     /// Power-on / hardware reset state of a 486SX.
     pub fn reset(&mut self) {
         self.regs = [0; 8];
-        self.regs[EDX] = 0x0000_0422; // reset signature: family 4, model 2 (486SX)
+        self.regs[EDX] = self.model.signature(); // reset signature
         self.cr0 = 0x6000_0010; // CD, NW, ET
         self.cpl = 0;
         for s in 0..6 {
@@ -227,6 +257,12 @@ impl Cpu {
         self.halted = false;
         self.shutdown = false;
         self.irq_inhibit = false;
+        self.fpu.init();
+    }
+
+    /// Whether this CPU has an x87 FPU.
+    pub fn has_fpu(&self) -> bool {
+        self.model == CpuModel::R1024
     }
 
     /// Protected mode enabled.
@@ -452,12 +488,44 @@ impl Cpu {
         Ok(v)
     }
 
+    /// Physical address of the next `n` code bytes when they can be read in
+    /// one go: inside the CS limit and the 15-byte instruction limit, and
+    /// (with paging) on one page. None means take the byte-at-a-time path,
+    /// which raises the right fault.
+    #[inline]
+    fn fetch_fast<B: Bus>(&mut self, bus: &mut B, n: u32) -> Option<u32> {
+        if self.ilen + n > 15 || self.eip > self.seg_limit[CS].saturating_sub(n - 1) || self.seg_limit[CS] < n - 1 {
+            return None;
+        }
+        let lin = self.seg_base[CS].wrapping_add(self.eip);
+        if self.cr0 & CR0_PG == 0 {
+            return Some(lin);
+        }
+        if (lin & 0xFFF) + n > 0x1000 {
+            return None;
+        }
+        self.translate(bus, lin, false, self.cpl == 3).ok()
+    }
+
     pub(crate) fn fetch16<B: Bus>(&mut self, bus: &mut B) -> R<u16> {
+        if let Some(p) = self.fetch_fast(bus, 2) {
+            self.ilen += 2;
+            self.eip = self.eip.wrapping_add(2);
+            return Ok(bus.read16(p));
+        }
         Ok(u16::from_le_bytes([self.fetch8(bus)?, self.fetch8(bus)?]))
     }
 
     pub(crate) fn fetch32<B: Bus>(&mut self, bus: &mut B) -> R<u32> {
-        Ok(self.fetch16(bus)? as u32 | (self.fetch16(bus)? as u32) << 16)
+        if let Some(p) = self.fetch_fast(bus, 4) {
+            self.ilen += 4;
+            self.eip = self.eip.wrapping_add(4);
+            return Ok(bus.read32(p));
+        }
+        Ok(self.fetch8(bus)? as u32
+            | (self.fetch8(bus)? as u32) << 8
+            | (self.fetch8(bus)? as u32) << 16
+            | (self.fetch8(bus)? as u32) << 24)
     }
 
     /// Fetch an immediate of `sz` bits (8, 16 or 32), zero-extended.

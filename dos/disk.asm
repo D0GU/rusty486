@@ -425,10 +425,12 @@ zero_cluster:
         push es
         push ds
         pop es
+        push eax                        ; EAX is the sector number
         mov di, secbuf
         mov cx, 256
         xor ax, ax
         rep stosw
+        pop eax
         pop es
         pop di
         call mark_dirty

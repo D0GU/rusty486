@@ -41,6 +41,25 @@ pub trait Bus {
         self.io_write16(port.wrapping_add(2), (value >> 16) as u16);
     }
 
+    /// Copy `len` bytes of physical memory from `src` to `dst` in one go, if
+    /// both ranges are plain memory (RAM or the linear framebuffer) and don't
+    /// overlap. Returns false (having done nothing) otherwise. Used to speed
+    /// up REP MOVS.
+    fn copy_block(&mut self, _dst: u32, _src: u32, _len: usize) -> bool {
+        false
+    }
+
+    /// Fill `len` bytes at `dst` with the little-endian `pattern` of `step`
+    /// bytes (1, 2 or 4), if the range is plain memory. For REP STOS.
+    fn fill_block(&mut self, _dst: u32, _pattern: u32, _step: usize, _len: usize) -> bool {
+        false
+    }
+
+    /// Bring time-based devices up to CPU cycle `now`. The CPU calls this
+    /// before every I/O port access, so devices that are only ticked
+    /// lazily still read back exact counter and status values.
+    fn sync(&mut self, _now: u64) {}
+
     /// Called when the CPU is ready to take a maskable interrupt (IF=1).
     /// Returns the vector number if an IRQ is pending, acknowledging it.
     fn irq_ack(&mut self) -> Option<u8> {

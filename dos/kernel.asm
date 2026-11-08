@@ -46,7 +46,7 @@ entry:
         SETVEC 0x28, int_iret
         SETVEC 0x29, int29
         SETVEC 0x2A, int_iret
-        SETVEC 0x2F, int_iret
+        SETVEC 0x2F, int2f
         SETVEC 0x33, int33
         mov eax, [es:0x1C*4]            ; chain the mouse cursor onto the timer hook
         mov [old_1c], eax
@@ -104,6 +104,15 @@ entry:
 
 int_iret:
         iret
+
+; INT 2Fh multiplex. AX=1680h (release time slice, used by idle DPMI
+; programs): wait for the next interrupt, so an idle machine really idles.
+int2f:  cmp ax, 0x1680
+        jne .done
+        sti
+        hlt
+        xor al, al                      ; AL = 0: supported
+.done:  iret
 int_retf:
         retf
 int24:  mov al, 3                       ; critical error: fail the call
@@ -197,7 +206,11 @@ fn_unsupported:
         jae .new
         mov byte [bp+F_AL], 0
         ret
-.new:   mov ax, E_FUNC
+.new:   cmp al, 0x71                    ; long file names: AX = 7100h, CF, like
+        jne .func                       ; MS-DOS, so programs fall back to 8.3
+        mov ax, 0x7100
+        jmp fail
+.func:  mov ax, E_FUNC
         jmp fail
 
 ; Caller's DS:DX as FS:SI.

@@ -23,9 +23,21 @@ pub enum Aspect {
     Stretch,
 }
 
+/// The emulated CPU.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CpuChoice {
+    /// The classic 486SX at a fixed clock (the `mhz` setting).
+    #[default]
+    #[serde(rename = "486SX")]
+    I486Sx,
+    /// The fantasy rusty R1024: FPU, and turbo clocking up to 1024 MHz.
+    R1024,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub cpu: CpuChoice,
     pub fullscreen: bool,
     pub aspect: Aspect,
     pub integer_scale: bool,
@@ -41,6 +53,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            cpu: CpuChoice::I486Sx,
             fullscreen: false,
             aspect: Aspect::Crt,
             integer_scale: false,
@@ -224,6 +237,7 @@ enum Id {
     Smooth,
     Scanlines,
     WindowScale,
+    Cpu,
     Speed,
     PauseResume,
     Reset,
@@ -336,7 +350,23 @@ impl Menu {
                 it(Id::WindowScale, "Window size", "When not fullscreen", Kind::Choice(format!("{}x", s.window_scale))),
             ],
             1 => vec![
-                it(Id::Speed, "CPU speed", "Emulated 486 clock", Kind::Choice(format!("{} MHz", s.mhz))),
+                it(
+                    Id::Cpu,
+                    "CPU",
+                    "Changing it resets the machine",
+                    Kind::Choice(
+                        match s.cpu {
+                            CpuChoice::I486Sx => "486SX",
+                            CpuChoice::R1024 => "R1024 (fantasy, FPU)",
+                        }
+                        .into(),
+                    ),
+                ),
+                if s.cpu == CpuChoice::R1024 {
+                    it(Id::Speed, "CPU speed", "As fast as this PC allows", Kind::Choice("Turbo, up to 1024 MHz".into()))
+                } else {
+                    it(Id::Speed, "CPU speed", "Emulated 486 clock", Kind::Choice(format!("{} MHz", s.mhz)))
+                },
                 it(
                     Id::PauseResume,
                     if emu.paused { "Paused" } else { "Running" },
@@ -430,6 +460,17 @@ impl Menu {
                 s.window_scale = (cycle(s.window_scale as usize - 1, 4) + 1) as u32;
                 fx.push(Effect::WindowScale);
             }
+            Id::Cpu => {
+                s.cpu = match s.cpu {
+                    CpuChoice::I486Sx => CpuChoice::R1024,
+                    CpuChoice::R1024 => CpuChoice::I486Sx,
+                };
+                emu.apply_cpu(s);
+                emu.machine.reset();
+                emu.resume();
+                self.message = "CPU changed: machine reset".into();
+            }
+            Id::Speed if s.cpu == CpuChoice::R1024 => {}
             Id::Speed => {
                 let i = SPEEDS.iter().position(|&m| m == s.mhz).unwrap_or(6);
                 s.mhz = SPEEDS[cycle(i, SPEEDS.len())];
@@ -1003,10 +1044,19 @@ mod tests {
         m.key(K::Down, &mut emu, &mut s);
         m.key(K::Right, &mut emu, &mut s);
         assert_eq!(s.aspect, Aspect::Square);
-        // Emulation: speed up.
+        // Emulation: the CPU switches to the fantasy R1024 and back.
         m.key(K::Tab, &mut emu, &mut s);
         m.key(K::Down, &mut emu, &mut s);
         m.key(K::Right, &mut emu, &mut s);
+        m.key(K::Right, &mut emu, &mut s);
+        assert_eq!(s.cpu, CpuChoice::R1024);
+        assert_eq!(emu.machine.cpu.model, rusty486_core::cpu::CpuModel::R1024);
+        assert!(emu.machine.clock_hz >= 100_000_000);
+        m.key(K::Right, &mut emu, &mut s);
+        assert_eq!(s.cpu, CpuChoice::I486Sx);
+        assert_eq!(emu.machine.clock_hz, 33_000_000);
+        // Speed up.
+        m.key(K::Down, &mut emu, &mut s);
         m.key(K::Right, &mut emu, &mut s);
         assert_eq!(s.mhz, 40);
         assert_eq!(emu.machine.clock_hz, 40_000_000);

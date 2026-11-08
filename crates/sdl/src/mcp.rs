@@ -399,7 +399,7 @@ impl Rusty486Mcp {
     }
 
     #[tool(description = "Change one host setting of the rusty486 window and save it, e.g. \
-        fullscreen=true, aspect=\"Stretch\", scanlines=true, mhz=66, volume=50.")]
+        fullscreen=true, aspect=\"Stretch\", scanlines=true, mhz=66, volume=50,         cpu=\"R1024\" (the fantasy CPU with an FPU and turbo clock up to 1024 MHz;         changing cpu resets the machine) or cpu=\"486SX\".")]
     async fn set_setting(&self, Parameters(a): Parameters<SetSettingArgs>) -> Result<CallToolResult, McpError> {
         self.try_with(move |emu| {
             let mut v = serde_json::to_value(&emu.settings).map_err(|e| e.to_string())?;
@@ -409,8 +409,14 @@ impl Rusty486Mcp {
             v[&a.name] = a.value.clone();
             let new: crate::settings::Settings =
                 serde_json::from_value(v).map_err(|e| format!("bad value for {}: {e}", a.name))?;
+            let cpu_changed = new.cpu != emu.settings.cpu;
             emu.settings = new;
-            emu.machine.clock_hz = emu.settings.mhz as u64 * 1_000_000;
+            let s = emu.settings.clone();
+            emu.apply_cpu(&s);
+            if cpu_changed {
+                emu.machine.reset();
+                emu.resume();
+            }
             emu.settings.save();
             emu.effects.push(crate::settings::Effect::Video);
             if a.name == "window_scale" || a.name == "aspect" {
