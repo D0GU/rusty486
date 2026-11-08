@@ -1,0 +1,4 @@
+[env]
+# SDL2's bundled CMakeLists predates CMake 4, which removed compatibility
+# with cmake_minimum_required < 3.5. This lets the bundled build configure.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

@@ -372,6 +372,16 @@ impl Cpu {
         Ok(v)
     }
 
+    /// POP into a segment register: only 16 bits are read, even with a
+    /// 32-bit operand size (which still adds 4 to SP).
+    pub(crate) fn pop_sreg<B: Bus>(&mut self, bus: &mut B, seg: usize) -> R<()> {
+        let sp = self.regs[ESP] as u16;
+        let v = self.rd(bus, SS, sp as u32, 16)?;
+        self.set_reg(16, ESP, sp.wrapping_add((self.osz() / 8) as u16) as u32);
+        self.load_seg_real(seg, v as u16);
+        Ok(())
+    }
+
     /// Read a value `depth` bytes above the stack pointer without popping.
     pub(crate) fn stack_peek<B: Bus>(&mut self, bus: &mut B, depth: u32, sz: u32) -> R<u32> {
         let sp = (self.regs[ESP] as u16).wrapping_add(depth as u16);

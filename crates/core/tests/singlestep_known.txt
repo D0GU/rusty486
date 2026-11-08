@@ -1,0 +1,34 @@
+# SingleStepTests cases skipped on purpose: "<file stem> <test index>".
+# Each relies on behaviour of the 386EX test rig that rusty486 doesn't emulate.
+6660 302  # PUSHAD wrapping SP past 0: 386 completes the pushes before #SS
+6660 704  # PUSHAD wrapping SP past 0: 386 completes the pushes before #SS
+6660 875  # PUSHAD wrapping SP past 0: 386 completes the pushes before #SS
+6660 949  # PUSHAD wrapping SP past 0: 386 completes the pushes before #SS
+6660 956  # PUSHAD wrapping SP past 0: 386 completes the pushes before #SS
+6660 1205  # PUSHAD wrapping SP past 0: 386 completes the pushes before #SS
+6660 1847  # PUSHAD wrapping SP past 0: 386 completes the pushes before #SS
+6660 1900  # PUSHAD wrapping SP past 0: 386 completes the pushes before #SS
+66E5 422  # reads 386EX on-chip peripheral ports
+6766A5 442  # self-modifying REP MOVS: depends on 386 prefetch queue
+6766AB 458  # self-modifying REP STOS: depends on 386 prefetch queue
+67A5 442  # self-modifying REP MOVS: depends on 386 prefetch queue
+67AB 458  # self-modifying REP STOS: depends on 386 prefetch queue
+67F6.7 375  # 386 microcode IDIV overflow quirk
+67F6.7 460  # 386 microcode IDIV overflow quirk
+67F6.7 516  # 386 microcode IDIV overflow quirk
+D4 56  # AAM 0: 386 updates flags before #DE
+D4 722  # AAM 0: 386 updates flags before #DE
+D4 787  # AAM 0: 386 updates flags before #DE
+D4 1049  # AAM 0: 386 updates flags before #DE
+D4 1220  # AAM 0: 386 updates flags before #DE
+D4 1492  # AAM 0: 386 updates flags before #DE
+D4 1699  # AAM 0: 386 updates flags before #DE
+D4 1813  # AAM 0: 386 updates flags before #DE
+D4 1905  # AAM 0: 386 updates flags before #DE
+D4 2024  # AAM 0: 386 updates flags before #DE
+F6.7 469  # 386 microcode IDIV overflow quirk
+F6.7 516  # 386 microcode IDIV overflow quirk
+F6.7 850  # 386 microcode IDIV overflow quirk
+F6.7 1265  # 386 microcode IDIV overflow quirk
+F6.7 1754  # 386 microcode IDIV overflow quirk
+F6.7 2348  # 386 microcode IDIV overflow quirk

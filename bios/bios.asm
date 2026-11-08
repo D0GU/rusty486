@@ -417,11 +417,9 @@ put_char:
         cmp al, 13
         je .cr
         ; printable: store char + attribute
-        push bx
-        call cursor_addr
-        mov ah, bl
-        pop bx
-        mov ah, bl
+        mov cl, bl                      ; attribute (CX is saved above)
+        call cursor_addr                ; DS:BX -> cell
+        mov ah, cl
         mov [bx], ax
         mov ax, BDA
         mov ds, ax
@@ -834,7 +832,7 @@ d_chs:  call select_drive
         xor al, al
 .ok:    pop edi
         pop ecx
-        mov [esp], al                   ; patch AL of the saved EAX
+        mov [esp], ax                   ; patch AL (count) and AH (status) of the saved EAX
         pop eax
         pop bx
         jmp d_done

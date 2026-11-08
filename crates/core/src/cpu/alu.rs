@@ -173,7 +173,12 @@ impl Cpu {
                 // SHL / SAL
                 let wide = (a as u64) << count;
                 let r = wide as u32 & m;
-                let cf = (wide >> sz) & 1 != 0;
+                // 386 quirk: byte shifts by 16 or 24 leave bit 0 in CF.
+                let cf = if sz == 8 && (count == 16 || count == 24) {
+                    a & 1 != 0
+                } else {
+                    (wide >> sz) & 1 != 0
+                };
                 self.set_flag(CF, cf);
                 self.set_flag(OF, (r & hb != 0) ^ cf);
                 self.set_flag(AF, false);
@@ -183,8 +188,15 @@ impl Cpu {
             5 => {
                 // SHR
                 let r = ((a as u64) >> count) as u32;
-                self.set_flag(CF, ((a as u64) >> (count - 1)) & 1 != 0);
-                self.set_flag(OF, a & hb != 0);
+                // 386 quirk: byte shifts by 16 or 24 leave bit 7 in CF.
+                let cf = if sz == 8 && (count == 16 || count == 24) {
+                    a & 0x80 != 0
+                } else {
+                    ((a as u64) >> (count - 1)) & 1 != 0
+                };
+                self.set_flag(CF, cf);
+                // Equals the original sign bit for count 1 (the defined case).
+                self.set_flag(OF, (r ^ (r << 1)) & hb != 0);
                 self.set_flag(AF, false);
                 self.szp(sz, r);
                 r
@@ -210,10 +222,11 @@ impl Cpu {
         }
         let m = mask(sz);
         let hb = msb(sz);
+        // 16-bit counts above 16 are undefined; the 386 behaves as if the
+        // source operand is repeated (dst:src:src), as the Pentium does.
         let (r, cf) = if left {
-            // Concatenate dst:src (and, for 16-bit, dst again) and shift left.
             let wide: u64 = if sz == 16 {
-                (dst as u64) << 48 | (src as u64) << 32 | (dst as u64) << 16
+                (dst as u64) << 48 | (src as u64) << 32 | (src as u64) << 16
             } else {
                 (dst as u64) << 32 | src as u64
             };
@@ -223,7 +236,7 @@ impl Cpu {
             (r, cf)
         } else {
             let wide: u64 = if sz == 16 {
-                (dst as u64) | (src as u64) << 16 | (dst as u64) << 32
+                (dst as u64) | (src as u64) << 16 | (src as u64) << 32
             } else {
                 (src as u64) << 32 | dst as u64
             };

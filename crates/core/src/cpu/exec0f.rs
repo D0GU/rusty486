@@ -64,10 +64,7 @@ impl Cpu {
                 let v = self.sregs[if op == 0xA0 { FS } else { GS }] as u32;
                 self.push(bus, osz, v)?;
             }
-            0xA1 | 0xA9 => {
-                let v = self.pop(bus, osz)?;
-                self.load_seg_real(if op == 0xA1 { FS } else { GS }, v as u16);
-            }
+            0xA1 | 0xA9 => self.pop_sreg(bus, if op == 0xA1 { FS } else { GS })?,
             0xA2 if self.has_cpuid => self.cpuid(),
             0xA3 | 0xAB | 0xB3 | 0xBB => {
                 let m = self.modrm(bus)?;

@@ -133,10 +133,7 @@ impl Cpu {
                 let v = self.sregs[(op >> 3) as usize] as u32;
                 self.push(bus, osz, v)?;
             }
-            0x07 | 0x17 | 0x1F => {
-                let v = self.pop(bus, osz)?;
-                self.load_seg_real((op >> 3) as usize, v as u16);
-            }
+            0x07 | 0x17 | 0x1F => self.pop_sreg(bus, (op >> 3) as usize)?,
             0x0F => return self.exec_0f(bus),
             0x27 => self.daa(),
             0x2F => self.das(),
