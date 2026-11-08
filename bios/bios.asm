@@ -31,6 +31,15 @@
 %define CMD_READ     1
 %define CMD_WRITE    2
 
+%define INPUT        0x320          ; rusty486 input device
+%define INPUT_COUNT  INPUT+0
+%define INPUT_TYPE   INPUT+1        ; read: head event type, write: pop
+%define INPUT_A      INPUT+2
+%define INPUT_B      INPUT+3
+%define INPUT_C      INPUT+4
+%define INPUT_D      INPUT+5
+%define INPUT_IRQ    INPUT+6
+
 %define DEBUG_PORT   0xE9
 %define CRTC         0x3D4
 %define TEXT_SEG     0xB800
@@ -39,6 +48,12 @@
 ; BIOS data area offsets
 %define BDA_EQUIP    0x10
 %define BDA_MEMKB    0x13
+%define BDA_SHIFT    0x17           ; keyboard shift flags
+%define BDA_KBHEAD   0x1A           ; keyboard buffer head/tail (offsets in BDA)
+%define BDA_KBTAIL   0x1C
+%define BDA_MIDNIGHT 0x70
+%define BDA_KBSTART  0x80
+%define BDA_KBEND    0x82
 %define BDA_DISKST   0x41           ; last floppy status
 %define BDA_MODE     0x49
 %define BDA_COLS     0x4A
@@ -79,6 +94,20 @@ start:
 %macro VECTOR 2
         mov word [es:%1*4], %2
 %endmacro
+        ; Hardware IRQs: unexpected ones just acknowledge the PIC.
+        mov di, 0x0A * 4
+        mov cx, 6
+.irqm:  mov word [es:di], irq_master
+        add di, 4
+        loop .irqm
+        mov di, 0x70 * 4
+        mov cx, 8
+.irqs:  mov word [es:di], irq_slave
+        add di, 4
+        loop .irqs
+
+        VECTOR 0x08, int08
+        VECTOR 0x09, int09
         VECTOR 0x10, int10
         VECTOR 0x11, int11
         VECTOR 0x12, int12
@@ -117,6 +146,47 @@ start:
         jz .nohd
         inc bl
 .nohd:  mov [BDA_NHD], bl
+
+        ; Keyboard buffer: 16 words at 40:1E.
+        mov word [BDA_KBSTART], 0x1E
+        mov word [BDA_KBEND], 0x3E
+        mov word [BDA_KBHEAD], 0x1E
+        mov word [BDA_KBTAIL], 0x1E
+
+        ; Interrupt controllers: master vectors 08h-0Fh, slave 70h-77h.
+        mov al, 0x11
+        out 0x20, al
+        out 0xA0, al
+        mov al, 0x08
+        out 0x21, al
+        mov al, 0x70
+        out 0xA1, al
+        mov al, 0x04
+        out 0x21, al
+        mov al, 0x02
+        out 0xA1, al
+        mov al, 0x01
+        out 0x21, al
+        out 0xA1, al
+        mov al, 0xF8                    ; enable IRQ0 (timer), IRQ1 (input), IRQ2 (cascade)
+        out 0x21, al
+        mov al, 0xFF
+        out 0xA1, al
+
+        ; Timer channel 0: square wave, divisor 65536 -> 18.2 Hz.
+        mov al, 0x36
+        out 0x43, al
+        xor al, al
+        out 0x40, al
+        out 0x40, al
+
+        ; Input device: interrupt on events.
+        mov dx, INPUT_IRQ
+        mov al, 1
+        out dx, al
+
+        ; Time of day from the real-time clock.
+        call rtc_to_ticks
 
         ; 486SX: no FPU, so make FPU instructions trap (#NM) for emulators.
         mov eax, cr0
@@ -159,6 +229,147 @@ msg_mem db '16384 KB RAM OK', 13, 10, 13, 10, 0
 
 dummy_iret:
         iret
+
+; Unexpected hardware interrupts: acknowledge and return.
+irq_master:
+        push ax
+        mov al, 0x20
+        out 0x20, al
+        pop ax
+        iret
+
+irq_slave:
+        push ax
+        mov al, 0x20
+        out 0xA0, al
+        out 0x20, al
+        pop ax
+        iret
+
+; Set the BDA tick count from the RTC's time of day. DS = BDA.
+rtc_to_ticks:
+        pushad
+        mov al, 4                       ; hours
+        call cmos_bin
+        imul ebx, eax, 3600
+        mov al, 2                       ; minutes
+        call cmos_bin
+        imul eax, eax, 60
+        add ebx, eax
+        mov al, 0                       ; seconds
+        call cmos_bin
+        add eax, ebx
+        mov ecx, 1193182                ; ticks = seconds * 1193182 / 65536
+        mul ecx
+        shrd eax, edx, 16
+        mov [BDA_TICKS], eax
+        mov byte [BDA_MIDNIGHT], 0
+        popad
+        ret
+
+; Read CMOS register AL as BCD -> binary in EAX.
+cmos_bin:
+        out 0x70, al
+        in al, 0x71
+        mov ah, al
+        shr ah, 4
+        and al, 0x0F
+        aad
+        movzx eax, al
+        ret
+
+; Read CMOS register AL -> AL (raw BCD).
+cmos_read:
+        out 0x70, al
+        in al, 0x71
+        ret
+
+; =============================================================================
+; INT 08h - timer tick (IRQ0, 18.2 Hz)
+; =============================================================================
+int08:
+        push ds
+        push eax
+        mov ax, BDA
+        mov ds, ax
+        inc dword [BDA_TICKS]
+        cmp dword [BDA_TICKS], 0x1800B0 ; ticks per day
+        jb .same_day
+        mov dword [BDA_TICKS], 0
+        mov byte [BDA_MIDNIGHT], 1
+.same_day:
+        int 0x1C                        ; user timer hook
+        mov al, 0x20
+        out 0x20, al
+        pop eax
+        pop ds
+        iret
+
+; =============================================================================
+; INT 09h - input device (IRQ1): move key presses into the BDA buffer
+; =============================================================================
+int09:
+        push ds
+        pusha
+        mov ax, BDA
+        mov ds, ax
+.next:  mov dx, INPUT_COUNT
+        in al, dx
+        test al, al
+        jz .done
+        mov dx, INPUT_TYPE
+        in al, dx
+        cmp al, 1
+        je .down
+        cmp al, 2
+        jne .pop                        ; mouse events are for INT 33h (TinyDOS)
+        mov dx, INPUT_C                 ; key up: just track the shift flags
+        in al, dx
+        mov [BDA_SHIFT], al
+        jmp .pop
+.down:  mov dx, INPUT_C
+        in al, dx
+        mov [BDA_SHIFT], al
+        mov dx, INPUT_D
+        in al, dx
+        test al, 2                      ; modifier keys don't produce keystrokes
+        jnz .pop
+        mov bl, al
+        mov dx, INPUT_A
+        in al, dx
+        mov ah, al                      ; AH = scancode
+        mov dx, INPUT_B
+        in al, dx                       ; AL = ASCII
+        test bl, 1
+        jz .store
+        test al, al
+        jnz .store
+        mov al, 0xE0                    ; enhanced-keyboard extended key
+.store: call kb_put
+.pop:   mov dx, INPUT_TYPE
+        out dx, al
+        jmp .next
+.done:  mov al, 0x20
+        out 0x20, al
+        popa
+        pop ds
+        iret
+
+; Append key word AX to the BDA keyboard buffer (dropped if full).
+; DS = BDA. Clobbers BX, SI.
+kb_put:
+        mov bx, [BDA_KBTAIL]
+        mov si, bx
+        add si, 2
+        cmp si, [BDA_KBEND]
+        jb .nowrap
+        mov si, [BDA_KBSTART]
+.nowrap:
+        cmp si, [BDA_KBHEAD]
+        je .full
+        mov [bx], ax
+        mov [BDA_KBTAIL], si
+.full:  ret
 
 ; =============================================================================
 ; INT 10h - video services
@@ -961,6 +1172,8 @@ int15:
         sti
         cmp ah, 0x88
         je .extmem
+        cmp ah, 0x86
+        je .wait
         cmp ax, 0x2400
         je .a20off
         cmp ax, 0x2401
@@ -974,6 +1187,30 @@ int15:
         retf 2
 .extmem:
         mov ax, 15360                   ; KB above 1 MB (16 MB total)
+        clc
+        retf 2
+; AH=86h: wait CX:DX microseconds (to the nearest 55 ms timer tick).
+.wait:  push ds
+        push eax
+        push ebx
+        push edx
+        movzx eax, cx
+        shl eax, 16
+        mov ax, dx
+        xor edx, edx
+        mov ebx, 54925
+        div ebx
+        inc eax
+        mov bx, BDA
+        mov ds, bx
+        add eax, [BDA_TICKS]
+.tick:  hlt
+        cmp [BDA_TICKS], eax
+        jb .tick
+        pop edx
+        pop ebx
+        pop eax
+        pop ds
         clc
         retf 2
 .a20off:
@@ -1004,30 +1241,106 @@ int15:
         retf 2
 
 ; =============================================================================
-; INT 16h - keyboard (stub until the input device arrives in a later milestone)
+; INT 16h - keyboard services (buffer filled by INT 09h)
 ; =============================================================================
 int16:
         sti
+        push ds
+        push si
+        mov si, BDA
+        mov ds, si
         cmp ah, 0x00
-        je .wait
+        je .read
         cmp ah, 0x10
-        je .wait
+        je .read
         cmp ah, 0x01
         je .peek
         cmp ah, 0x11
         je .peek
         cmp ah, 0x02
         je .shift
+        cmp ah, 0x12
+        je .shift12
+        cmp ah, 0x05
+        je .push
+.ret:   pop si
+        pop ds
         iret
-.wait:  hlt                             ; no keyboard yet: wait forever
+
+; AH=00h/10h: wait for a key, return AH = scancode, AL = ASCII.
+.read:  push bx
+        mov bl, ah
+.wait:  cli
+        mov si, [BDA_KBHEAD]
+        cmp si, [BDA_KBTAIL]
+        jne .got
+        sti
+        hlt
         jmp .wait
-.peek:  push bp                         ; return ZF=1 (no key) in caller's flags
+.got:   mov ax, [si]
+        add si, 2
+        cmp si, [BDA_KBEND]
+        jb .nowrap
+        mov si, [BDA_KBSTART]
+.nowrap:
+        mov [BDA_KBHEAD], si
+        sti
+        cmp bl, 0x10                    ; the old call hides E0 extended codes
+        je .rdone
+        cmp al, 0xE0
+        jne .rdone
+        xor al, al
+.rdone: pop bx
+        jmp .ret
+
+; AH=01h/11h: check for a key: ZF=1 if none, else AX = key (not removed).
+.peek:  cli
+        mov si, [BDA_KBHEAD]
+        cmp si, [BDA_KBTAIL]
+        sti
+        je .empty
+        push bx
+        mov bl, ah
+        mov ax, [si]
+        cmp bl, 0x11
+        je .pok
+        cmp al, 0xE0
+        jne .pok
+        xor al, al
+.pok:   pop bx
+        push bp
         mov bp, sp
-        or word [bp+6], 0x0040
+        and word [bp+10], ~0x0040       ; caller's ZF = 0
         pop bp
-        iret
-.shift: xor al, al
-        iret
+        jmp .ret
+.empty: push bp
+        mov bp, sp
+        or word [bp+10], 0x0040         ; caller's ZF = 1
+        pop bp
+        jmp .ret
+
+; AH=02h/12h: shift flags.
+.shift: mov al, [BDA_SHIFT]
+        jmp .ret
+.shift12:
+        mov al, [BDA_SHIFT]
+        mov ah, [BDA_SHIFT+1]
+        jmp .ret
+
+; AH=05h: push key CX into the buffer. AL = 0 ok, 1 full.
+.push:  push bx
+        mov ax, cx
+        cli
+        mov bx, [BDA_KBTAIL]
+        call kb_put
+        cmp bx, [BDA_KBTAIL]
+        sti
+        mov al, 0
+        jne .pushed
+        mov al, 1
+.pushed:
+        pop bx
+        jmp .ret
 
 ; =============================================================================
 ; INT 18h / 19h - boot
@@ -1077,23 +1390,69 @@ msg_boot_c  db 'Booting from hard disk C:...', 13, 10, 0
 msg_noboot  db 'No bootable disk found. System halted.', 13, 10, 0
 
 ; =============================================================================
-; INT 1Ah - time of day (no timer yet: ticks stay at zero)
+; INT 1Ah - time of day and real-time clock
 ; =============================================================================
 int1a:
         sti
-        cmp ah, 0x00
-        jne .unsupported
         push ds
-        mov ax, BDA
-        mov ds, ax
+        push si
+        mov si, BDA
+        mov ds, si
+        cmp ah, 0x00
+        je .get
+        cmp ah, 0x01
+        je .set
+        cmp ah, 0x02
+        je .time
+        cmp ah, 0x04
+        je .date
+        pop si
+        pop ds
+        stc
+        retf 2
+; AH=00h: CX:DX = ticks since midnight, AL = midnight flag (then cleared).
+.get:   cli
         mov dx, [BDA_TICKS]
         mov cx, [BDA_TICKS+2]
-        xor al, al
+        mov al, [BDA_MIDNIGHT]
+        mov byte [BDA_MIDNIGHT], 0
+        sti
+        jmp .ok
+; AH=01h: set ticks from CX:DX.
+.set:   cli
+        mov [BDA_TICKS], dx
+        mov [BDA_TICKS+2], cx
+        mov byte [BDA_MIDNIGHT], 0
+        sti
+        jmp .ok
+; AH=02h: CH:CL:DH = hours:minutes:seconds (BCD), DL = 0 (no DST).
+.time:  mov al, 4
+        call cmos_read
+        mov ch, al
+        mov al, 2
+        call cmos_read
+        mov cl, al
+        mov al, 0
+        call cmos_read
+        mov dh, al
+        xor dl, dl
+        jmp .ok
+; AH=04h: CH = century, CL = year, DH = month, DL = day (BCD).
+.date:  mov al, 0x32
+        call cmos_read
+        mov ch, al
+        mov al, 9
+        call cmos_read
+        mov cl, al
+        mov al, 8
+        call cmos_read
+        mov dh, al
+        mov al, 7
+        call cmos_read
+        mov dl, al
+.ok:    pop si
         pop ds
         clc
-        retf 2
-.unsupported:
-        stc
         retf 2
 
 ; =============================================================================

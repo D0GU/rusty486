@@ -2,9 +2,13 @@
 //! around it (pause state, disk files, debug log). The MCP server talks to it
 //! by sending `Job`s that the main loop runs between frames.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use rusty486_asm::AsmError;
+use rusty486_core::devices::input::shift;
+
+use crate::keymap::{KeyState, PcKey};
 use rusty486_core::devices::disk::DiskImage;
 use rusty486_core::machine::{Drive, RunResult};
 use rusty486_core::Machine;
@@ -57,6 +61,10 @@ pub struct Emu {
     pub editor: Editor,
     editor_cells: Vec<u8>,
     pub last_build: Option<BuildSummary>,
+    /// Host keyboard shift/lock state for the guest.
+    pub keys: KeyState,
+    /// Keystrokes queued by MCP `type_text`: (key, needs shift).
+    pub typing: VecDeque<(PcKey, bool)>,
 }
 
 impl Emu {
@@ -75,6 +83,43 @@ impl Emu {
             editor,
             editor_cells: vec![0; editor::COLS * editor::ROWS * 2],
             last_build: None,
+            keys: KeyState::default(),
+            typing: VecDeque::new(),
+        }
+    }
+
+    /// A host key went down/up while the machine view has focus.
+    pub fn host_key(&mut self, key: PcKey, down: bool, layout_char: Option<char>) {
+        let modifier = self.keys.update(key, down);
+        let ascii = if down && !modifier { self.keys.ascii(key, layout_char) } else { 0 };
+        self.machine.key_event(key.code, key.ext, down, ascii, self.keys.flags, modifier);
+    }
+
+    /// Release held modifiers (when the machine view loses focus).
+    pub fn release_modifiers(&mut self) {
+        for (code, bit) in [(0x2A, shift::LSHIFT), (0x36, shift::RSHIFT), (0x1D, shift::CTRL), (0x38, shift::ALT)] {
+            if self.keys.flags & bit != 0 {
+                self.host_key(PcKey { code, ext: false }, false, None);
+            }
+        }
+    }
+
+    /// Press and release a key with the given extra shift flags (MCP input).
+    pub fn tap_key(&mut self, key: PcKey, extra_flags: u8) {
+        let state = KeyState { flags: self.keys.flags | extra_flags };
+        let ascii = state.ascii(key, None);
+        self.machine.key_event(key.code, key.ext, true, ascii, state.flags, false);
+        self.machine.key_event(key.code, key.ext, false, 0, state.flags, false);
+    }
+
+    /// Feed queued MCP keystrokes without overflowing the guest's buffers.
+    pub fn feed_typing(&mut self) {
+        for _ in 0..2 {
+            if self.machine.bus.input.pending() > 4 {
+                break;
+            }
+            let Some((key, shifted)) = self.typing.pop_front() else { break };
+            self.tap_key(key, if shifted { shift::LSHIFT } else { 0 });
         }
     }
 

@@ -8,12 +8,13 @@
 //! With no disks, it boots the built-in milestone 1 demo floppy. Disk images
 //! the guest writes to are saved back to their files on exit.
 //!
-//! Keys: Esc = switch between the machine and the editor, Ctrl+F9 / Ctrl+R =
-//! build and run the project, F11 = reset, Pause = pause/resume.
+//! Keys: F12 = machine -> editor (Esc goes back), Ctrl+F9 = build and run the
+//! project, F11 = reset, Pause = pause/resume. Other keys go to the machine.
 
 mod editor;
 mod emu;
 mod font;
+mod keymap;
 mod mcp;
 mod project;
 mod screen;
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use rusty486_core::devices::disk::DiskImage;
 use rusty486_core::machine::{Drive, Machine};
-use sdl2::event::Event;
+use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::{Keycode, Mod};
 use sdl2::mouse::MouseButton;
 use sdl2::pixels::PixelFormatEnum;
@@ -103,6 +104,7 @@ fn run(args: Args) -> Result<(), String> {
     let editor = Editor::open(project.entry_path())
         .map_err(|e| format!("{}: {e}", project.entry_path().display()))?;
     println!("Project: {} ({})", project.name, project.dir.display());
+    machine.set_time(chrono::Local::now().naive_local().and_utc().timestamp());
     let mut emu = Emu::new(machine, project, editor);
 
     if args.disks.is_empty() {
@@ -145,6 +147,7 @@ fn run(args: Args) -> Result<(), String> {
     let mut last_disk_check = Instant::now();
     let mut speed_window = (Instant::now(), emu.machine.cpu.cycles);
     let mut title = String::new();
+    let mut mouse_buttons = 0u8;
     // Mouse position (logical pixels) -> text cell.
     let cell = |x: i32, y: i32| {
         let col = (x.max(0) as u32 / 8).min(79) as usize;
@@ -156,33 +159,58 @@ fn run(args: Args) -> Result<(), String> {
         for event in events.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'main,
-                Event::KeyDown { keycode: Some(key), keymod, .. } => {
+                Event::KeyDown { keycode, scancode, keymod, .. } => {
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
-                    match (emu.view, key) {
-                        (_, Keycode::F11) => {
+                    match (emu.view, keycode) {
+                        (_, Some(Keycode::F11)) => {
                             emu.machine.reset();
                             emu.resume();
                         }
-                        (_, Keycode::Pause) => {
+                        (_, Some(Keycode::Pause)) => {
                             if emu.paused {
                                 emu.resume();
                             } else {
                                 emu.pause("paused from keyboard".into());
                             }
                         }
-                        (View::Machine, Keycode::Escape) => emu.view = View::Editor,
-                        (View::Machine, Keycode::F9 | Keycode::R) if ctrl => {
+                        (View::Machine, Some(Keycode::F12)) => {
+                            emu.release_modifiers();
+                            emu.view = View::Editor;
+                        }
+                        (View::Machine, Some(Keycode::F9)) if ctrl => {
+                            emu.release_modifiers();
                             emu.build_and_run();
                         }
-                        (View::Machine, Keycode::F5) => {
-                            emu.build_and_run();
+                        (View::Machine, _) => {
+                            if let Some(k) = scancode.and_then(keymap::pc_key) {
+                                emu.host_key(k, true, keymap::layout_char(keycode));
+                            }
                         }
-                        (View::Editor, _) => {
+                        (View::Editor, Some(key)) => {
                             let action = emu.editor.key(key, keymod, &clipboard);
                             handle_action(&mut emu, action);
                         }
                         _ => {}
                     }
+                }
+                Event::KeyUp { scancode: Some(sc), .. } if emu.view == View::Machine => {
+                    if let Some(k) = keymap::pc_key(sc) {
+                        emu.host_key(k, false, None);
+                    }
+                }
+                Event::Window { win_event: WindowEvent::FocusLost, .. } => emu.release_modifiers(),
+                Event::MouseMotion { x, y, .. } if emu.view == View::Machine => {
+                    let px = (x.max(0) as u32).min(SCREEN_W - 1) as u16;
+                    let py = ((y.max(0) as u32) * SCREEN_H / VIEW_H).min(SCREEN_H - 1) as u16;
+                    emu.machine.mouse_move(px, py);
+                }
+                Event::MouseButtonDown { mouse_btn, .. } if emu.view == View::Machine => {
+                    mouse_buttons |= button_bit(mouse_btn);
+                    emu.machine.mouse_buttons(mouse_buttons);
+                }
+                Event::MouseButtonUp { mouse_btn, .. } if emu.view == View::Machine => {
+                    mouse_buttons &= !button_bit(mouse_btn);
+                    emu.machine.mouse_buttons(mouse_buttons);
                 }
                 Event::TextInput { text, .. } if emu.view == View::Editor => {
                     emu.editor.text_input(&text);
@@ -201,6 +229,8 @@ fn run(args: Args) -> Result<(), String> {
                 _ => {}
             }
         }
+
+        emu.feed_typing();
 
         // Pick up source edits made outside rusty486 (e.g. by Claude Code).
         if last_disk_check.elapsed() >= Duration::from_millis(500) {
@@ -256,6 +286,16 @@ fn run(args: Args) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Input-device button bit (1 left, 2 right, 4 middle).
+fn button_bit(b: MouseButton) -> u8 {
+    match b {
+        MouseButton::Left => 1,
+        MouseButton::Right => 2,
+        MouseButton::Middle => 4,
+        _ => 0,
+    }
 }
 
 fn handle_action(emu: &mut Emu, action: Action) {

@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
 use crate::editor::Level;
+use crate::keymap;
 use crate::emu::{BuildSummary, Emu, Job, View, Waiter};
 
 pub const DEFAULT_PORT: u16 = 8486;
@@ -221,6 +222,18 @@ pub struct WriteSourceArgs {
     pub path: Option<String>,
     /// The complete new file contents.
     pub content: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TypeTextArgs {
+    /// Text to type into the machine (US keyboard layout; \n = Enter).
+    pub text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct PressKeyArgs {
+    /// Key or combination: "enter", "esc", "f1", "up", "a", "ctrl+c", "alt+x", "shift+tab".
+    pub key: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -687,6 +700,49 @@ impl Rusty486Mcp {
             let mut v = build_json(&summary);
             v["status"] = status_json(emu);
             Ok(v)
+        })
+        .await
+    }
+
+    #[tool(description = "Type text into the emulated machine's keyboard (queued at about 60 \
+        keys per second so the BIOS buffer doesn't overflow). Use \\n for Enter.")]
+    async fn type_text(&self, Parameters(a): Parameters<TypeTextArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let mut skipped = String::new();
+            for c in a.text.chars() {
+                match keymap::key_for_char(c) {
+                    Some(k) => emu.typing.push_back(k),
+                    None => skipped.push(c),
+                }
+            }
+            let n = emu.typing.len();
+            Ok(json!({
+                "queued_keys": n,
+                "approx_seconds": n as f64 / 60.0,
+                "skipped_characters": skipped,
+            }))
+        })
+        .await
+    }
+
+    #[tool(description = "Press and release one key or a combination on the emulated keyboard, \
+        e.g. \"enter\", \"esc\", \"f1\", \"up\", \"ctrl+c\", \"alt+f\".")]
+    async fn press_key(&self, Parameters(a): Parameters<PressKeyArgs>) -> Result<CallToolResult, McpError> {
+        self.try_with(move |emu| {
+            let mut flags = 0u8;
+            let parts: Vec<&str> = a.key.split('+').map(str::trim).collect();
+            let (last, mods) = parts.split_last().ok_or("empty key")?;
+            for m in mods {
+                flags |= match m.to_ascii_lowercase().as_str() {
+                    "ctrl" | "control" => rusty486_core::devices::input::shift::CTRL,
+                    "alt" => rusty486_core::devices::input::shift::ALT,
+                    "shift" => rusty486_core::devices::input::shift::LSHIFT,
+                    other => return Err(format!("unknown modifier '{other}'")),
+                };
+            }
+            let key = keymap::key_by_name(last).ok_or_else(|| format!("unknown key '{last}'"))?;
+            emu.tap_key(key, flags);
+            Ok(json!({ "pressed": a.key }))
         })
         .await
     }

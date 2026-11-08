@@ -5,6 +5,10 @@ use std::collections::BTreeSet;
 use crate::bus::Bus;
 use crate::cpu::{Cpu, CS};
 use crate::devices::disk::{self, DiskController, DiskImage};
+use crate::devices::input::Input;
+use crate::devices::pic::Pic;
+use crate::devices::pit::Pit;
+use crate::devices::rtc::Rtc;
 use crate::devices::video::{self, Video};
 
 pub const RAM_SIZE: usize = 16 * 1024 * 1024;
@@ -21,10 +25,17 @@ pub struct PcBus {
     pub bios: Vec<u8>,
     pub disk: DiskController,
     pub video: Video,
+    pub pic: Pic,
+    pub pit: Pit,
+    pub input: Input,
+    pub rtc: Rtc,
     /// Bytes written to the debug port since the frontend last drained it.
     pub debug_out: Vec<u8>,
     /// Fast A20 gate (port 92h bit 1). When off, address line 20 is forced low.
     pub a20: bool,
+    /// CPU cycle count and clock as of the last tick (for time-based devices).
+    pub now: u64,
+    pub clock_hz: u64,
 }
 
 impl PcBus {
@@ -38,8 +49,23 @@ impl PcBus {
             bios: rom,
             disk: DiskController::default(),
             video: Video::default(),
+            pic: Pic::default(),
+            pit: Pit::default(),
+            input: Input::default(),
+            rtc: Rtc::default(),
             debug_out: Vec::new(),
             a20: true,
+            now: 0,
+            clock_hz: 33_000_000,
+        }
+    }
+
+    /// Advance time-based devices to CPU cycle `now`.
+    pub fn tick(&mut self, now: u64) {
+        let delta = now.saturating_sub(self.now);
+        self.now = now;
+        if delta > 0 && self.pit.advance_cycles(delta, self.clock_hz) > 0 {
+            self.pic.raise(0);
         }
     }
 
@@ -77,6 +103,10 @@ impl Bus for PcBus {
     fn io_read8(&mut self, port: u16) -> u8 {
         match port {
             0x92 => (self.a20 as u8) << 1,
+            p if Pic::handles(p) => self.pic.read(p),
+            p if Pit::handles(p) => self.pit.read(p),
+            p if Rtc::handles(p) => self.rtc.read(p, self.now, self.clock_hz),
+            p if Input::handles(p) => self.input.read(p),
             p if Video::handles(p) => self.video.read(p),
             p if (disk::BASE_PORT..disk::BASE_PORT + 0x20).contains(&p) => self.disk.read(p),
             _ => 0xFF,
@@ -87,12 +117,24 @@ impl Bus for PcBus {
         match port {
             DEBUG_PORT => self.debug_out.push(value),
             0x92 => self.a20 = value & 2 != 0,
+            p if Pic::handles(p) => self.pic.write(p, value),
+            p if Pit::handles(p) => self.pit.write(p, value),
+            p if Rtc::handles(p) => self.rtc.write(p, value),
+            p if Input::handles(p) => {
+                if self.input.write(p, value) {
+                    self.pic.raise(1);
+                }
+            }
             p if Video::handles(p) => self.video.write(p, value),
             p if (disk::BASE_PORT..disk::BASE_PORT + 0x20).contains(&p) => {
                 self.disk.write(p, value, &mut self.ram)
             }
             _ => {}
         }
+    }
+
+    fn irq_ack(&mut self) -> Option<u8> {
+        self.pic.ack()
     }
 }
 
@@ -142,7 +184,35 @@ impl Machine {
 
     /// Execute exactly one instruction (or interrupt delivery).
     pub fn step(&mut self) {
+        self.bus.clock_hz = self.clock_hz;
         self.cpu.step(&mut self.bus);
+        self.bus.tick(self.cpu.cycles);
+    }
+
+    /// Set the real-time clock (local time, seconds since 1970).
+    pub fn set_time(&mut self, secs: i64) {
+        self.bus.rtc.set_time(secs, self.cpu.cycles);
+    }
+
+    /// Keyboard event: set-1 scancode, extended (E0) flag, down/up, the ASCII
+    /// character it produces (0 if none), BIOS shift flags after the event,
+    /// and whether it's a modifier key.
+    pub fn key_event(&mut self, scancode: u8, extended: bool, down: bool, ascii: u8, flags: u8, modifier: bool) {
+        if self.bus.input.key(scancode, extended, down, ascii, flags, modifier) {
+            self.bus.pic.raise(1);
+        }
+    }
+
+    pub fn mouse_move(&mut self, x: u16, y: u16) {
+        if self.bus.input.mouse_move(x, y) {
+            self.bus.pic.raise(1);
+        }
+    }
+
+    pub fn mouse_buttons(&mut self, buttons: u8) {
+        if self.bus.input.mouse_buttons(buttons) {
+            self.bus.pic.raise(1);
+        }
     }
 
     pub fn insert_disk(&mut self, drive: Drive, image: DiskImage) {
@@ -167,18 +237,30 @@ impl Machine {
     /// execution reaches a breakpoint. The instruction at the current PC
     /// always executes first, so resuming from a breakpoint makes progress.
     pub fn run_cycles(&mut self, cycles: u64) -> RunResult {
+        self.bus.clock_hz = self.clock_hz;
         let end = self.cpu.cycles + cycles;
         while self.cpu.cycles < end {
             if self.cpu.shutdown {
                 self.cpu.cycles = end;
+                self.bus.tick(end);
                 return RunResult::Shutdown;
             }
-            if self.cpu.halted && self.cpu.eflags & crate::cpu::flags::IF == 0 {
-                // Halted with interrupts off: nothing can wake us. Skip ahead.
-                self.cpu.cycles = end;
-                break;
+            if self.cpu.halted {
+                if self.cpu.eflags & crate::cpu::flags::IF == 0 {
+                    // Halted with interrupts off: nothing can wake us. Skip ahead.
+                    self.cpu.cycles = end;
+                    self.bus.tick(end);
+                    break;
+                }
+                if !self.bus.pic.has_pending() {
+                    // Waiting for an interrupt: jump to the next timer tick.
+                    let left = end - self.cpu.cycles;
+                    let skip = self.bus.pit.cycles_to_irq0(self.clock_hz).unwrap_or(left).min(left);
+                    self.cpu.cycles += skip.saturating_sub(1);
+                }
             }
             self.cpu.step(&mut self.bus);
+            self.bus.tick(self.cpu.cycles);
             if !self.breakpoints.is_empty() && !self.cpu.halted {
                 let pc = self.pc();
                 if self.breakpoints.contains(&pc) {
