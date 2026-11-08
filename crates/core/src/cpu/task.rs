@@ -137,6 +137,12 @@ impl Cpu {
         self.regs = regs;
         self.eip = eip;
 
+        // From here on, faults belong to the new task: don't roll back into
+        // the old one.
+        self.restore_regs = self.regs;
+        self.restore_eflags = self.eflags;
+        self.start_eip = self.eip;
+
         // LDT, then the segment registers, with the new task's privilege.
         self.lldt(bus, ldt).map_err(|_| ts(ldt))?;
         if self.vm() {

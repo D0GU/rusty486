@@ -184,6 +184,9 @@ impl Cpu {
                         saved_sp = v;
                     } else {
                         self.set_reg(osz, r, v);
+                        // The 386 keeps registers already popped when a later
+                        // pop faults (SingleStepTests capture this).
+                        self.restore_regs[r] = self.regs[r];
                     }
                 }
                 if osz == 32 && self.quirks_386 && !self.stack32() {
@@ -863,6 +866,8 @@ impl Cpu {
             self.regs[ECX] -= n;
             self.cycles += 3 * n as u64;
             done += n;
+            self.restore_regs = self.regs;
+            self.restore_eflags = self.eflags;
         }
         done
     }
@@ -945,6 +950,9 @@ impl Cpu {
             let c = self.reg(asz, ECX).wrapping_sub(1);
             self.set_reg(asz, ECX, c);
             done += 1;
+            // A fault in a later iteration keeps this one's progress.
+            self.restore_regs = self.regs;
+            self.restore_eflags = self.eflags;
             if let Some(eq) = cmp_eq {
                 if (self.rep == Rep::Repe && !eq) || (self.rep == Rep::Repne && eq) {
                     break;

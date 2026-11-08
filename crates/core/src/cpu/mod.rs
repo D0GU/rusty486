@@ -171,6 +171,10 @@ pub struct Cpu {
 
     // Per-instruction decode state.
     start_eip: u32,
+    /// General registers and EFLAGS to restore if the instruction faults
+    /// (as of its start, or of the last completed REP iteration).
+    restore_regs: [u32; 8],
+    restore_eflags: u32,
     ilen: u32,
     seg_ovr: Option<usize>,
     op32: bool,
@@ -219,6 +223,8 @@ impl Cpu {
             tlb_tag: vec![0; paging::TLB_SIZE],
             tlb_data: vec![0; paging::TLB_SIZE],
             start_eip: 0,
+            restore_regs: [0; 8],
+            restore_eflags: 2,
             ilen: 0,
             seg_ovr: None,
             op32: false,
@@ -313,7 +319,8 @@ impl Cpu {
         }
 
         self.start_eip = self.eip;
-        let start_esp = self.regs[ESP];
+        self.restore_regs = self.regs;
+        self.restore_eflags = self.eflags;
         self.ilen = 0;
         self.seg_ovr = None;
         let d = self.code32();
@@ -326,8 +333,13 @@ impl Cpu {
         if let Err(fault) = self.exec(bus) {
             // Faults restart the instruction: the pushed IP is the faulting one,
             // and any partial stack pointer change (POPA, ENTER...) is undone.
+            // Faults are precise: undo any register or flag changes the
+            // instruction made before faulting (e.g. ADC [mem] updating CF
+            // before its write hits a not-present page), so that restarting
+            // it after the handler gives the right result.
             self.eip = self.start_eip;
-            self.regs[ESP] = start_esp;
+            self.regs = self.restore_regs;
+            self.eflags = self.restore_eflags;
             self.deliver(bus, fault.0, self.start_eip, IntKind::Exception(fault.1));
         }
     }
