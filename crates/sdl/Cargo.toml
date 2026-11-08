@@ -1,0 +1,16 @@
+[package]
+name = "rusty486-sdl"
+description = "rusty486 desktop frontend (SDL2): window, input, audio, debugger and editor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "rusty486"
+path = "src/main.rs"
+
+[dependencies]
+rusty486-core = { path = "../core" }
+sdl2 = { version = "0.37", features = ["bundled", "static-link"] }
+font8x8 = "0.3"

@@ -1,0 +1,4 @@
+/target
+# Downloaded SingleStepTests data (fetch with scripts/fetch-tests.ps1)
+/testdata
+*.img.bak

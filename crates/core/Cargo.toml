@@ -1,0 +1,11 @@
+[package]
+name = "rusty486-core"
+description = "rusty486 emulator core: i486 CPU, bus and devices. No host I/O, so it can target WASM."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+flate2 = "1"
