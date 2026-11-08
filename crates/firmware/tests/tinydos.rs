@@ -535,3 +535,101 @@ end_of_image:
     pc.type_line("VER");
     pc.expect("TinyDOS version 1.0");
 }
+
+#[test]
+fn command_line_history_and_completion() {
+    let mut pc = Pc::boot(&[
+        ("README.TXT", b"Hello from a text file!\r\n"),
+        ("RECIPE.TXT", b"Two eggs.\r\n"),
+    ]);
+    let key = |pc: &mut Pc, code: u8, ext: bool, ascii: u8| {
+        pc.m.key_event(code, ext, true, ascii, 0, false);
+        pc.m.key_event(code, ext, false, 0, 0, false);
+        pc.run_ms(20);
+    };
+    let typ = |pc: &mut Pc, s: &str| {
+        for c in s.chars() {
+            pc.m.key_event(0x02, false, true, c as u8, 0, false);
+            pc.m.key_event(0x02, false, false, 0, 0, false);
+            pc.run_ms(5);
+        }
+    };
+    const UP: u8 = 0x48;
+    const LEFT: u8 = 0x4B;
+    const TAB: u8 = 0x0F;
+    const ENTER: u8 = 0x1C;
+
+    // History: Up recalls VER.
+    pc.type_line("VER");
+    key(&mut pc, UP, true, 0);
+    key(&mut pc, ENTER, false, 13);
+    pc.run_ms(300);
+    assert_eq!(pc.screen().matches("TinyDOS version 1.0").count(), 2, "{}", pc.screen());
+
+    // Editing in the middle of the line: "VR", Left, "E" -> "VER".
+    typ(&mut pc, "CLS");
+    key(&mut pc, ENTER, false, 13);
+    pc.run_ms(200);
+    typ(&mut pc, "VR");
+    key(&mut pc, LEFT, true, 0);
+    typ(&mut pc, "E");
+    key(&mut pc, ENTER, false, 13);
+    pc.run_ms(300);
+    pc.expect("TinyDOS version 1.0");
+
+    // Esc clears the line.
+    typ(&mut pc, "XYZZY");
+    key(&mut pc, 0x01, false, 27);
+    typ(&mut pc, "VER");
+    key(&mut pc, ENTER, false, 13);
+    pc.run_ms(300);
+    assert!(!pc.screen().contains("XYZZY"), "{}", pc.screen());
+
+    // Completing a file name.
+    pc.type_line("CLS");
+    typ(&mut pc, "TYPE REA");
+    key(&mut pc, TAB, false, 9);
+    key(&mut pc, ENTER, false, 13);
+    pc.run_ms(300);
+    pc.expect("TYPE README.TXT");
+    pc.expect("Hello from a text file!");
+
+    // Two matches: Tab does nothing, a second Tab lists them.
+    typ(&mut pc, "TYPE RE");
+    key(&mut pc, TAB, false, 9);
+    key(&mut pc, TAB, false, 9);
+    pc.run_ms(100);
+    pc.expect("README.TXT");
+    pc.expect("RECIPE.TXT");
+    key(&mut pc, 0x01, false, 27);
+    key(&mut pc, ENTER, false, 13);
+
+    // Directories get a backslash; commands complete too.
+    pc.type_line("MD GAMES");
+    typ(&mut pc, "CD GA");
+    key(&mut pc, TAB, false, 9);
+    key(&mut pc, ENTER, false, 13);
+    pc.run_ms(300);
+    pc.expect(r"A:\GAMES>");
+    pc.type_line("CD \\");
+    typ(&mut pc, "HISTO");
+    key(&mut pc, TAB, false, 9);
+    key(&mut pc, ENTER, false, 13);
+    pc.run_ms(300);
+    pc.expect("   1  VER");
+    pc.expect("CD GAMES\\");
+
+    // DIR shows ".." without a stray extension.
+    pc.type_line("CD GAMES");
+    pc.type_line("DIR");
+    let s = pc.screen();
+    assert!(s.lines().any(|l| l.starts_with("..   ") && l.contains("<DIR>") && !l.starts_with("..       .")), "{s}");
+
+    // DIR /W lists names in columns, directories in brackets.
+    pc.type_line("CD \\");
+    pc.type_line("CLS");
+    pc.type_line("DIR /W");
+    let s = pc.screen();
+    assert!(s.contains("[GAMES]") && s.contains("README.TXT") && s.contains("RECIPE.TXT") && s.contains("file(s)"), "{s}");
+    assert!(s.lines().any(|l| l.contains("README.TXT") && l.contains("RECIPE.TXT")), "{s}");
+}

@@ -1,9 +1,11 @@
 ; =============================================================================
 ; TinyDOS COMMAND.COM - the command interpreter
 ;
-; Internal commands: CD CLS COPY DATE DEL DIR ECHO EXIT HELP MD MEM PAUSE RD
-; REM REN TIME TYPE VER, drive changes (A:), and .COM/.EXE/.BAT programs from
-; the current directory or the root. Runs AUTOEXEC.BAT when started with /P.
+; Internal commands: CD CLS COPY DATE DEL DIR ECHO EXIT HELP HISTORY MD MEM
+; PAUSE RD REM REN TIME TYPE VER, drive changes (A:), and .COM/.EXE/.BAT
+; programs from the current directory or the root. Runs AUTOEXEC.BAT when
+; started with /P. The command line has history and Tab completion
+; (lineedit.inc).
 ; =============================================================================
 
         bits 16
@@ -42,13 +44,8 @@ start:  mov sp, stack_top
 main_loop:
         mov sp, stack_top
         call prompt
-        mov byte [linebuf], 126
-        mov dx, linebuf
-        mov ah, 0x0A
-        int 0x21
+        call read_line
         call newline
-        movzx bx, byte [linebuf+1]
-        mov byte [linebuf+2+bx], 0
         mov si, linebuf+2
         call execute
         jmp main_loop
@@ -146,7 +143,8 @@ execute:
 commands:
         dw s_cd, cmd_cd, s_chdir, cmd_cd, s_cls, cmd_cls, s_copy, cmd_copy
         dw s_date, cmd_date, s_del, cmd_del, s_erase, cmd_del, s_dir, cmd_dir
-        dw s_echo, cmd_echo, s_exit, cmd_exit, s_help, cmd_help, s_md, cmd_md
+        dw s_echo, cmd_echo, s_exit, cmd_exit, s_help, cmd_help, s_history, cmd_history
+        dw s_md, cmd_md
         dw s_mkdir, cmd_md, s_mem, cmd_mem, s_pause, cmd_pause, s_rd, cmd_rd
         dw s_rmdir, cmd_rd, s_rem, cmd_rem, s_ren, cmd_ren, s_rename, cmd_ren
         dw s_time, cmd_time, s_type, cmd_type, s_ver, cmd_ver
@@ -163,6 +161,7 @@ s_dir    db 'DIR', 0
 s_echo   db 'ECHO', 0
 s_exit   db 'EXIT', 0
 s_help   db 'HELP', 0
+s_history db 'HISTORY', 0
 s_md     db 'MD', 0
 s_mkdir  db 'MKDIR', 0
 s_mem    db 'MEM', 0
@@ -639,9 +638,35 @@ cmd_mem:
         mov si, msg_mem
         jmp print
 
+; DIR [path] [/W] [/P]: /W lists names in columns, /P pauses each screen.
 cmd_dir:
+        mov byte [dir_wide], 0
+        mov byte [dir_page], 0
+        mov byte [dir_lines], 0
+        mov byte [dir_col], 0
+        mov byte [path1], 0
         mov si, [args_trim]
-        call arg_to_path
+.arg:   call skip_spaces
+        cmp byte [si], 0
+        je .args_done
+        cmp byte [si], '/'
+        jne .path
+        mov al, [si+1]
+        call upcase
+        cmp al, 'W'
+        jne .notw
+        mov byte [dir_wide], 1
+.notw:  cmp al, 'P'
+        jne .skip
+        mov byte [dir_page], 1
+        jmp .skip
+.path:  cmp byte [path1], 0
+        jne .skip
+        mov di, path1
+        call copy_word
+.skip:  call skip_word
+        jmp .arg
+.args_done:
         cmp byte [path1], 0
         jne .given
         mov dword [path1], '*.*'
@@ -704,10 +729,19 @@ cmd_dir:
         mov ah, 0x4E
         int 0x21
         jc .summary
-.entry: call dir_line
+.entry: cmp byte [dir_wide], 0
+        jne .wide
+        call dir_line
+        call dir_more
+        jmp .nextent
+.wide:  call dir_wide_entry
+.nextent:
         mov ah, 0x4F
         int 0x21
         jnc .entry
+        cmp byte [dir_col], 0
+        je .summary
+        call newline
 .summary:
         mov eax, [dir_files]
         call print_num
@@ -739,6 +773,53 @@ cmd_dir:
         call print
 .r:     ret
 
+; DIR /W: the name from the DTA in a 16-column cell, five per line.
+dir_wide_entry:
+        mov si, dta+30
+        call strlen
+        test byte [dta+21], 0x10
+        jz .file
+        mov al, '['
+        call putc
+        call print
+        mov al, ']'
+        call putc
+        add cx, 2
+        jmp .count
+.file:  call print
+        mov eax, [dta+26]
+        add [dir_bytes], eax
+.count: inc dword [dir_files]
+        inc byte [dir_col]
+        cmp byte [dir_col], 5
+        jb .pad
+        mov byte [dir_col], 0
+        call newline
+        jmp dir_more
+.pad:   mov al, ' '
+.p:     call putc
+        inc cx
+        cmp cx, 16
+        jb .p
+        ret
+
+; DIR /P: after a screenful of lines, wait for a key.
+dir_more:
+        cmp byte [dir_page], 0
+        je .r
+        inc byte [dir_lines]
+        cmp byte [dir_lines], 22
+        jb .r
+        mov byte [dir_lines], 0
+        push si
+        mov si, msg_pause
+        call print
+        mov ah, 0x08
+        int 0x21
+        call newline
+        pop si
+.r:     ret
+
 ; One DIR line from the DTA: NAME     EXT    <DIR>/size  date  time
 dir_line:
         mov si, dta+30
@@ -764,7 +845,8 @@ dir_line:
         jmp .x
 .nd:    cmp byte [dta+30], '.'
         jne .print
-        mov word [outline], '. '        ; "." / ".." entries
+        mov dword [outline+9], '    '   ; "." / ".." entries: no extension
+        mov word [outline], '. '
         cmp byte [dta+31], '.'
         jne .print
         mov word [outline], '..'
@@ -922,6 +1004,8 @@ file_exists:
         int 0x21
         ret
 
+%include "lineedit.inc"
+
 ; Copy NUL-terminated SI to DI (DI ends after the NUL).
 strcpy: lodsb
         stosb
@@ -1059,19 +1143,26 @@ msg_time      db 'Current time is ', 0
 msg_help      db 'TinyDOS commands:', 13, 10
               db '  CD [dir]       change directory     CLS            clear the screen', 13, 10
               db '  COPY src dst   copy a file          DATE / TIME    show date / time', 13, 10
-              db '  DEL file       delete files         DIR [path]     list files', 13, 10
+              db '  DEL file       delete files         DIR [path]     list files (/W /P)', 13, 10
               db '  ECHO [text]    print text           EXIT           leave this shell', 13, 10
               db '  MD dir         make a directory     MEM            free memory', 13, 10
               db '  PAUSE          wait for a key       RD dir         remove a directory', 13, 10
               db '  REN old new    rename a file        TYPE file      show a text file', 13, 10
               db '  VER            version              X:             change drive', 13, 10
-              db 'Programs (.COM, .EXE, .BAT) run from the current directory or the root.', 13, 10, 0
+              db '  HISTORY        list recent commands', 13, 10
+              db 'Programs (.COM, .EXE, .BAT) run from the current directory or the root.', 13, 10
+              db 'Keys: Up/Down history, F3 last command, Tab completes names (twice: list),', 13, 10
+              db '      Left/Right/Home/End/Ctrl+arrows move, Ins overwrite, Esc clears.', 13, 10, 0
 
 permanent     db 0
 echo_on       db 1
 h_src         dw 0
 h_dst         dw 0
 dir_files     dd 0
+dir_wide      db 0
+dir_page      db 0
+dir_lines     db 0
+dir_col       db 0
 dir_bytes     dd 0
 args          dw 0
 args_trim     dw 0
@@ -1085,6 +1176,25 @@ path2         times 80 db 0
 dirpart       times 80 db 0
 outline       times 16 db 0
 linebuf       times 130 db 0
+; Line editor state (lineedit.inc).
+ed_len        dw 0
+ed_pos        dw 0
+ed_old        dw 0
+ed_back       dw 0
+ed_row        db 0
+ed_col        db 0
+ed_tabs       db 0
+ed_over       db 0
+hist_count    dw 0
+hist_next     dw 0
+cp_word       dw 0
+cp_name       dw 0
+cp_first      db 0
+cp_dot        db 0
+cp_count      dw 0
+cp_ptr        dw 0
+cp_matches    times CP_MAX * 14 db 0
+hist_buf      times HIST_N * HIST_SZ db 0
 dta           times 128 db 0
 iobuf         times 4096 db 0
 batchbuf      times 4096 db 0

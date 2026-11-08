@@ -38,9 +38,12 @@ services.
 assembly (`dos/`): FAT12/FAT16 with subdirectories, an INT 21h subset (console,
 files, directories, find first/next, memory, EXEC of .COM and MZ .EXE,
 TSRs), an INT 33h mouse driver and COMMAND.COM (DIR, TYPE, COPY, DEL, REN,
-MD, RD, CD, MEM, DATE, TIME, ECHO, PAUSE, batch files, AUTOEXEC.BAT).
-Drive C: is a persistent 32 MB TinyDOS disk in `%USERPROFILE%
-usty486\hdd.img`.
+MD, RD, CD, MEM, DATE, TIME, ECHO, PAUSE, HISTORY, DIR /W /P, batch files,
+AUTOEXEC.BAT). The command line has DOSKEY-style editing: Up/Down history
+(32 commands), F3, Left/Right/Home/End and Ctrl+arrows, Insert/overwrite,
+Esc, and Tab completion of files, directories, programs and commands (a
+second Tab lists the matches).
+Drive C: is a persistent 32 MB TinyDOS disk in `%USERPROFILE%\rusty486\hdd.img`.
 
 **Milestone 6, done:** protected mode (descriptors, privilege levels, call
 gates, interrupt/trap gates with TSS stack switches, LDT/TR, I/O permission
