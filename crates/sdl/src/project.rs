@@ -269,11 +269,31 @@ const RPP_EXAMPLES: &[(&str, &[u8])] = &[
     ("RPP/WRITE.RS", include_bytes!("../../../dos/rustland/examples/WRITE.RS")),
 ];
 
-/// Put the current RUSTLAND.EXE in C:\ and the examples in C:\RPP.
+/// R++ Write, installed in its own folder, C:\WRITE.
+const WRITE_FILES: &[(&str, &[u8], bool)] = &[
+    ("WRITE/WRITE.EXE", include_bytes!("../../../dos/write/WRITE.EXE"), true),
+    ("WRITE/README.TXT", include_bytes!("../../../dos/write/README.TXT"), true),
+    ("WRITE/SAMPLE.WP", include_bytes!("../../../dos/write/SAMPLE.WP"), false),
+];
+
+/// Put the current RUSTLAND.EXE in C:\, the examples in C:\RPP and R++
+/// Write in C:\WRITE. Programs and docs are kept current; documents and
+/// sources the user may have edited are only added if missing.
 fn install_rustland(data: &mut [u8]) {
     let Ok(mut fs) = Fs::open(data) else { return };
     if fs.read("RUSTLAND.EXE").ok().as_deref() != Some(RUSTLAND_EXE) {
         let _ = fs.write("RUSTLAND.EXE", RUSTLAND_EXE);
+    }
+    for (path, bytes, update) in WRITE_FILES {
+        let bytes: Vec<u8> = if path.ends_with(".TXT") {
+            String::from_utf8_lossy(bytes).replace("\r\n", "\n").replace('\n', "\r\n").into_bytes()
+        } else {
+            bytes.to_vec()
+        };
+        let current = fs.read(path).ok();
+        if current.is_none() || (*update && current.as_deref() != Some(&bytes[..])) {
+            let _ = fs.write_creating_dirs(path, &bytes);
+        }
     }
     for (path, bytes) in RPP_EXAMPLES {
         if !fs.exists(path) {

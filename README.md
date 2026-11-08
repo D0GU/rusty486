@@ -112,16 +112,40 @@ Not supported: generics, traits, closures, tuples, `Option`/`Result`,
 checker. Programs are therefore "Rust-shaped" rather than full Rust; real rustc
 cannot run on the emulated machine.
 
-`C:\RPP\WRITE.RS` is a word processor (word wrap, justification, bold/italic/
-underline, save/load) built on a small ncurses-style library, written live into
-the IDE over MCP. `cargo run -p rusty486-lang --bin rppc -- FILE.RS` compiles
-R++ on the host.
+### R++ Write
 
-To rebuild the IDE after changing `crates/rustland` or `crates/lang`:
+**R++ Write 2.0** (`C:\WRITE`, source `C:\RPP\WRITE.RS`) is a word processor for
+writing books, written in R++ on a small ncurses-style library. Type
+`CD \WRITE` and `WRITE SAMPLE` to open the sample book.
+
+- **Menus** in the Rustland style (File, Edit, Search, Format, Style, View,
+  Book, Options, Help) with dialogs, buttons and shadows.
+- **Files:** New, Open (file list), Save, Save as, Export text, Rename,
+  Delete, with prompts for unsaved changes. `.WP` keeps all formatting;
+  export writes Markdown-style text (`#` chapter, `##` section, `>` quote),
+  which Open imports.
+- **Formatting:** bold, italic, underline, left/centre/right/justified
+  paragraphs; paragraph styles for chapter and section headings, block
+  quotes, scene breaks and writer's notes (kept out of the word count and
+  the export).
+- **Book tools:** chapter outline with word counts and pages (F5), page
+  breaks, statistics (F9), a session word goal with a progress bar, focus
+  mode (F7), typewriter scrolling, first-line indents, auto-save.
+- **Editing:** selection, cut/copy/paste, undo, find, replace all, go to
+  page, word and chapter movement; documents up to 200,000 characters.
+- **Colours:** Borland Blue, Paper, Amber and Midnight themes, saved with
+  the other options in `WRITE.CFG`.
+
+`dos/write/` holds the built program, its README and the sample book
+(`scripts/make-write-sample.py`). `cargo run -p rusty486-lang --bin rppc --
+FILE.RS` compiles R++ on the host.
+
+To rebuild the IDE and R++ Write after changing `crates/rustland`, `crates/lang`
+or `WRITE.RS`:
 
 ```powershell
 rustup target add i586-unknown-linux-gnu
-scripts/build-rustland.ps1        # writes dos/rustland/RUSTLAND.EXE
+scripts/build-rustland.ps1        # writes RUSTLAND.EXE and dos/write/WRITE.EXE
 ```
 
 The emulator copies the current `RUSTLAND.EXE` to `C:\` on every start and the
@@ -227,6 +251,7 @@ cargo test -p rusty486-lang --release   # R++ programs and the IDE, run under Ti
 | `crates/lang` | R++ compiler (`no_std`), PM stub packer, `pmpack` ELF packer. |
 | `crates/rustland` | Rustland R++ IDE (bare-metal i586, built separately). |
 | `dos/rustland/` | Built `RUSTLAND.EXE` and the example programs. |
+| `dos/write/` | R++ Write: built `WRITE.EXE`, README and a sample book (installed as `C:\WRITE`). |
 | `dos/` | TinyDOS sources: boot sector, kernel, COMMAND.COM. |
 | `crates/sdl` | Desktop frontend (`rusty486` binary). |
 | `bios/` | BIOS and demo boot sector (NASM). |

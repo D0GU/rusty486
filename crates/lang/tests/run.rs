@@ -305,6 +305,38 @@ fn main() {
 }
 
 #[test]
+fn big_statics_and_memory_moves() {
+    expect(
+        r#"
+static mut BIG: [u8; 100000] = [0; 100000];
+static mut WORDS: [u32; 4] = [0, 0, 0, 0];
+static mut INIT: [u8; 3] = [1, 2, 3];
+
+fn main() {
+    unsafe {
+        for i in 0..10 { BIG[i] = b'a' + i as u8; }
+        // Overlapping move to the right, then to the left.
+        move_bytes(BIG.as_mut_ptr().add(3), BIG.as_ptr(), 10);
+        println!("{}", str_from_bytes(&BIG[..13]));
+        move_bytes(BIG.as_mut_ptr(), BIG.as_ptr().add(3), 10);
+        println!("{}", str_from_bytes(&BIG[..10]));
+        fill_bytes(BIG.as_mut_ptr(), b'z', 4);
+        copy_bytes(BIG.as_mut_ptr().add(99990), BIG.as_ptr(), 4);
+        println!("{} {} {} {}", str_from_bytes(&BIG[99990..99994]), BIG[99999], WORDS[3], INIT[2]);
+    }
+}
+"#,
+        "abcabcdefghij
+abcdefghij
+zzzz 0 0 3",
+    );
+    // The zero-filled array is not stored in the executable.
+    let exe = rusty486_lang::compile("static mut A: [u8; 200000] = [0; 200000];
+fn main() { unsafe { A[5] = 1; } }").unwrap();
+    assert!(exe.len() < 20000, "{}", exe.len());
+}
+
+#[test]
 fn files() {
     expect(
         r#"

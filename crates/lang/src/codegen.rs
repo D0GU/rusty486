@@ -52,7 +52,7 @@ struct FnBody {
 #[derive(Clone)]
 enum Global {
     Const(Ty, Expr),
-    Static(Ty, u32),
+    Static(Ty, Abs),
 }
 
 #[derive(Clone)]
@@ -220,9 +220,9 @@ impl Gen {
 
     /// Register all items of a source file (structs, enums, consts, statics
     /// and function signatures). Bodies are compiled by `finish`.
-    pub fn declare(&mut self, items: &[Item], prelude: bool) -> R<()> {
+    pub fn declare(&mut self, items: Vec<Item>, prelude: bool) -> R<()> {
         self.in_prelude = prelude;
-        for it in items {
+        for it in &items {
             match it {
                 Item::Struct(s) => {
                     if self.struct_ids.contains_key(&s.name) || self.enum_ids.contains_key(&s.name) {
@@ -258,7 +258,7 @@ impl Gen {
             }
         }
         // Enum discriminants.
-        for it in items {
+        for it in &items {
             if let Item::Enum(e) = it {
                 let id = self.enum_ids[&e.name];
                 let mut next = 0i64;
@@ -281,40 +281,52 @@ impl Gen {
             self.layout_struct(id)?;
         }
         // Const types.
-        for it in items {
+        for it in &items {
             if let Item::Const(n, ty, e, _) = it {
                 let t = self.resolve_ty(ty)?;
                 self.globals.insert(n.clone(), Global::Const(t, e.clone()));
             }
         }
         // Statics.
-        for it in items {
+        for it in &items {
             if let Item::Static(n, ty, e, span) = it {
                 if self.globals.contains_key(n) {
                     return err(*span, format!("the name `{n}` is defined multiple times"));
                 }
                 let t = self.resolve_ty(ty)?;
+                // All-zero statics live in the BSS (zeroed at load, not stored in the file).
+                if self.is_zero_init(e) {
+                    let off = align_up(self.bss, align_of(&t, self).max(4));
+                    self.bss = off + self.size(&t);
+                    self.globals.insert(n.clone(), Global::Static(t, Abs::Bss(off)));
+                    continue;
+                }
                 let off = align_up(self.data.len() as u32, align_of(&t, self).max(4));
                 self.data.resize((off + self.size(&t)) as usize, 0);
                 self.static_init(&t, e, off)?;
-                self.globals.insert(n.clone(), Global::Static(t, off));
+                self.globals.insert(n.clone(), Global::Static(t, Abs::Data(off)));
             }
         }
-        // Function signatures.
+        // Function signatures. The bodies are moved, not copied: the syntax
+        // tree of a large program is a good part of the compiler's memory.
         for it in items {
             match it {
-                Item::Fn(f) => self.declare_fn(f, f.name.clone(), None, prelude)?,
+                Item::Fn(f) => {
+                    let key = f.name.clone();
+                    self.declare_fn(f, key, None, prelude)?
+                }
                 Item::Impl(owner, fns, span) => {
                     let self_ty = if owner == "str" {
                         Ty::Str
                     } else {
-                        self.resolve_ty(&TypeExpr::Name(owner.clone(), *span))?
+                        self.resolve_ty(&TypeExpr::Name(owner.clone(), span))?
                     };
                     if matches!(self_ty, Ty::Ptr(_) | Ty::Slice(_) | Ty::Array(..)) {
-                        return err(*span, "impl blocks are only supported for named types");
+                        return err(span, "impl blocks are only supported for named types");
                     }
                     for f in fns {
-                        self.declare_fn(f, format!("{owner}::{}", f.name), Some(self_ty.clone()), prelude)?;
+                        let key = format!("{owner}::{}", f.name);
+                        self.declare_fn(f, key, Some(self_ty.clone()), prelude)?;
                     }
                 }
                 _ => {}
@@ -323,7 +335,7 @@ impl Gen {
         Ok(())
     }
 
-    fn declare_fn(&mut self, f: &FnDecl, key: String, self_ty: Option<Ty>, prelude: bool) -> R<()> {
+    fn declare_fn(&mut self, f: FnDecl, key: String, self_ty: Option<Ty>, prelude: bool) -> R<()> {
         let saved = core::mem::replace(&mut self.self_ty, self_ty.clone());
         let mut params = Vec::new();
         if let Some(k) = f.self_kind {
@@ -344,7 +356,7 @@ impl Gen {
             return err(f.span, format!("the name `{key}` is defined multiple times"));
         }
         map.insert(key, sig.clone());
-        self.bodies.push(FnBody { decl: f.clone(), sig, self_ty, prelude });
+        self.bodies.push(FnBody { decl: f, sig, self_ty, prelude });
         Ok(())
     }
 
@@ -578,6 +590,18 @@ impl Gen {
             _ => return err(e.span, "this static initializer is not supported (use constants, arrays and struct literals)"),
         }
         Ok(())
+    }
+
+    /// Whether a static initializer is all zero bytes (integers, bools, chars, arrays of them).
+    fn is_zero_init(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::ArrayRepeat(x, _) => self.is_zero_init(x),
+            ExprKind::ArrayLit(xs) => !xs.is_empty() && xs.iter().all(|x| self.is_zero_init(x)),
+            ExprKind::Int(..) | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Byte(_) | ExprKind::Unary(..) | ExprKind::Cast(..) => {
+                self.const_eval(e) == Ok(0)
+            }
+            _ => false,
+        }
     }
 
     /// Intern a string literal in the data section; returns its offset.
@@ -868,8 +892,8 @@ impl Gen {
                     self.asm.lea(EAX, EBP, l.off);
                     return Ok((l.ty, l.mutable));
                 }
-                if let Some(Global::Static(t, off)) = self.globals.get(&p[0]).cloned() {
-                    self.asm.mov_r_abs(EAX, Abs::Data(off));
+                if let Some(Global::Static(t, at)) = self.globals.get(&p[0]).cloned() {
+                    self.asm.mov_r_abs(EAX, at);
                     return Ok((t, true));
                 }
                 err(e.span, format!("cannot find value `{}` in this scope", p[0]))
@@ -1215,8 +1239,8 @@ impl Gen {
                     r?;
                     return Ok(t);
                 }
-                Some(Global::Static(t, off)) => {
-                    self.asm.mov_r_abs(EAX, Abs::Data(off));
+                Some(Global::Static(t, at)) => {
+                    self.asm.mov_r_abs(EAX, at);
                     self.load_eax(&t);
                     return Ok(t);
                 }
@@ -2571,6 +2595,48 @@ impl Gen {
                 self.asm.pop(ESI);
                 self.asm.pop(ECX);
                 self.asm.rep_movsb();
+                Ty::Unit
+            }
+            "__memmove" | "move_bytes" | "copy_bytes" => {
+                // dst, src, n; overlapping ranges are handled (copies backwards when needed).
+                arity(3)?;
+                let p = Ty::ptr(u8t.clone());
+                self.expr_as(&args[2], &Ty::usize())?;
+                self.asm.push(EAX);
+                self.expr_as(&args[1], &p)?;
+                self.asm.push(EAX);
+                self.expr_as(&args[0], &p)?;
+                self.asm.mov_rr(EDI, EAX);
+                self.asm.pop(ESI);
+                self.asm.pop(ECX);
+                let (fwd, done) = (self.asm.label(), self.asm.label());
+                self.asm.alu_rr(Alu::Cmp, EDI, ESI);
+                self.asm.jcc(Cc::Be, fwd);
+                self.asm.test_rr(ECX, ECX);
+                self.asm.jcc(Cc::E, done);
+                self.asm.lea_rr(ESI, ESI, ECX, -1);
+                self.asm.lea_rr(EDI, EDI, ECX, -1);
+                self.asm.std();
+                self.asm.rep_movsb();
+                self.asm.cld();
+                self.asm.jmp(done);
+                self.asm.bind(fwd);
+                self.asm.rep_movsb();
+                self.asm.bind(done);
+                Ty::Unit
+            }
+            "fill_bytes" => {
+                arity(3)?;
+                let p = Ty::ptr(u8t.clone());
+                self.expr_as(&args[2], &Ty::usize())?;
+                self.asm.push(EAX);
+                self.expr_as(&args[1], &u8t)?;
+                self.asm.push(EAX);
+                self.expr_as(&args[0], &p)?;
+                self.asm.mov_rr(EDI, EAX);
+                self.asm.pop(EAX);
+                self.asm.pop(ECX);
+                self.asm.rep_stosb();
                 Ty::Unit
             }
             "__memset" => {

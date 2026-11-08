@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use crate::Error;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Tok {
-    Ident(String),
+pub enum Tok<'a> {
+    Ident(&'a str),
     /// Value and optional type suffix (`5u8`).
     Int(u64, Option<String>),
     Str(Vec<u8>),
@@ -27,8 +27,8 @@ pub struct Span {
 }
 
 #[derive(Clone, Debug)]
-pub struct Token {
-    pub tok: Tok,
+pub struct Token<'a> {
+    pub tok: Tok<'a>,
     pub span: Span,
 }
 
@@ -68,9 +68,11 @@ impl Cursor<'_> {
     }
 }
 
-pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
+pub fn lex(src: &str) -> Result<Vec<Token<'_>>, Error> {
     let mut c = Cursor { b: src.as_bytes(), i: 0, line: 1, col: 1 };
-    let mut out = Vec::new();
+    // Roughly one token per 4 bytes of source: reserve once rather than
+    // doubling (freed doublings fragment the IDE's heap).
+    let mut out = Vec::with_capacity(src.len() / 4 + 16);
     while let Some(ch) = c.peek(0) {
         let span = c.span();
         let err = |m: &str| Error::new(span, m);
@@ -170,7 +172,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
             while c.peek(0).is_some_and(|x| x.is_ascii_alphanumeric() || x == b'_') {
                 c.adv(1);
             }
-            out.push(Token { tok: Tok::Ident(String::from(&src[s..c.i])), span });
+            out.push(Token { tok: Tok::Ident(&src[s..c.i]), span });
             continue;
         }
         if ch == b'"' {

@@ -11,7 +11,7 @@ use crate::lexer::{Tok, Token};
 use crate::Error;
 
 pub struct Parser<'t> {
-    toks: &'t [Token],
+    toks: &'t [Token<'t>],
     pos: usize,
 }
 
@@ -65,20 +65,20 @@ fn block_like(e: &ExprKind) -> bool {
 }
 
 impl<'t> Parser<'t> {
-    pub fn new(toks: &'t [Token]) -> Self {
+    pub fn new(toks: &'t [Token<'t>]) -> Self {
         Parser { toks, pos: 0 }
     }
 
-    fn peek(&self) -> &Tok {
+    fn peek(&self) -> &Tok<'t> {
         &self.toks[self.pos].tok
     }
-    fn peek_at(&self, k: usize) -> &Tok {
+    fn peek_at(&self, k: usize) -> &Tok<'t> {
         &self.toks[(self.pos + k).min(self.toks.len() - 1)].tok
     }
     fn span(&self) -> Span {
         self.toks[self.pos].span
     }
-    fn bump(&mut self) -> Tok {
+    fn bump(&mut self) -> Tok<'t> {
         let t = self.toks[self.pos].tok.clone();
         if self.pos < self.toks.len() - 1 {
             self.pos += 1;
@@ -89,7 +89,7 @@ impl<'t> Parser<'t> {
         matches!(self.peek(), Tok::Punct(q) if *q == p)
     }
     fn is_kw(&self, k: &str) -> bool {
-        matches!(self.peek(), Tok::Ident(s) if s == k)
+        matches!(self.peek(), Tok::Ident(s) if *s == k)
     }
     fn eat(&mut self, p: &str) -> bool {
         if self.is(p) {
@@ -130,9 +130,9 @@ impl<'t> Parser<'t> {
     }
     fn ident(&mut self) -> R<String> {
         match self.peek().clone() {
-            Tok::Ident(s) if !is_keyword(&s) => {
+            Tok::Ident(s) if !is_keyword(s) => {
                 self.bump();
-                Ok(s)
+                Ok(String::from(s))
             }
             _ => self.err(&format!("expected a name, found {}", self.found())),
         }
@@ -356,7 +356,7 @@ impl<'t> Parser<'t> {
         let mut name = match self.peek().clone() {
             Tok::Ident(s) => {
                 self.bump();
-                s
+                String::from(s)
             }
             _ => return self.err(&format!("expected a type, found {}", self.found())),
         };
@@ -554,6 +554,7 @@ impl<'t> Parser<'t> {
             if self.eat(".") {
                 match self.peek().clone() {
                     Tok::Ident(name) => {
+                        let name = String::from(name);
                         self.bump();
                         if self.eat("(") {
                             let args = self.args(")")?;
@@ -645,7 +646,7 @@ impl<'t> Parser<'t> {
             }
             Tok::Punct("{") => mk(ExprKind::Block(self.block()?)),
             Tok::Punct("|") | Tok::Punct("||") => self.err("closures are not supported"),
-            Tok::Ident(k) => match k.as_str() {
+            Tok::Ident(k) => match k {
                 "true" | "false" => {
                     self.bump();
                     mk(ExprKind::Bool(k == "true"))
@@ -695,7 +696,7 @@ impl<'t> Parser<'t> {
                     let v = if self.range_end() { None } else { Some(Box::new(self.expr()?)) };
                     mk(ExprKind::Return(v))
                 }
-                _ if is_keyword(&k) && k != "self" && k != "Self" => self.err(&format!("unexpected keyword `{k}`")),
+                _ if is_keyword(k) && k != "self" && k != "Self" => self.err(&format!("unexpected keyword `{k}`")),
                 _ => self.path_expr(ns),
             },
             _ => self.err(&format!("expected an expression, found {}", self.found())),
@@ -706,7 +707,7 @@ impl<'t> Parser<'t> {
         let span = self.span();
         let mut path = Vec::new();
         match self.bump() {
-            Tok::Ident(s) => path.push(s),
+            Tok::Ident(s) => path.push(String::from(s)),
             _ => unreachable!(),
         }
         while self.is("::") {
@@ -752,7 +753,7 @@ impl<'t> Parser<'t> {
         match self.peek().clone() {
             Tok::Ident(s) => {
                 self.bump();
-                Ok(s)
+                Ok(String::from(s))
             }
             _ => self.err("expected a name after `::`"),
         }
@@ -818,11 +819,11 @@ impl<'t> Parser<'t> {
         let span = self.span();
         // A plain lowercase name binds; paths and literals compare.
         if let Tok::Ident(s) = self.peek().clone() {
-            if !matches!(self.peek_at(1), Tok::Punct("::" | "(" | "{" | "..=" | "..")) && !is_keyword(&s) {
+            if !matches!(self.peek_at(1), Tok::Punct("::" | "(" | "{" | "..=" | "..")) && !is_keyword(s) {
                 let first = s.chars().next().unwrap_or('a');
                 if first.is_ascii_lowercase() || first == '_' {
                     self.bump();
-                    return Ok(Pat::Bind(s));
+                    return Ok(Pat::Bind(String::from(s)));
                 }
             }
         }

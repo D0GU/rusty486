@@ -303,6 +303,16 @@ impl Asm {
         self.b(0xF3);
         self.b(0xAA);
     }
+    pub fn std(&mut self) {
+        self.b(0xFD);
+    }
+    /// `lea dst, [base + index + disp8]`.
+    pub fn lea_rr(&mut self, dst: u8, base: u8, index: u8, disp: i8) {
+        self.b(0x8D);
+        self.b(0x44 | (dst & 7) << 3);
+        self.b((index & 7) << 3 | (base & 7));
+        self.b(disp as u8);
+    }
     pub fn cld(&mut self) {
         self.b(0xFC);
     }

@@ -86,8 +86,8 @@ pub fn compile_image(src: &str) -> Result<Image, Error> {
     let prelude = parse(prelude::SOURCE, PRELUDE_LINE)?;
     let user = parse(src, 0)?;
     let mut g = codegen::Gen::new();
-    g.declare(&prelude, true)?;
-    g.declare(&user, false)?;
+    g.declare(prelude, true)?;
+    g.declare(user, false)?;
     g.finish()?;
     if let Err(l) = g.asm.resolve() {
         return Err(Error { line: 0, col: 0, msg: alloc::format!("internal error: unbound label {l}") });
