@@ -364,6 +364,8 @@ static mut FOCUS: bool = false;
 static mut PAGE_LINES: u32 = 40;
 static mut GOAL: u32 = 1000;
 static mut SESSION_BASE: u32 = 0;
+// Words written this session in earlier files of a numbered sequence.
+static mut SESSION_CARRY: u32 = 0;
 
 fn kind_of(st: u8) -> u8 {
     st & 7
@@ -676,12 +678,17 @@ fn changed() {
     }
 }
 
-// Insert n characters with styles at pos.
-fn ins_bytes(pos: usize, t: *const u8, s: *const u8, n: usize) {
+// When an insert does not fit, the "document full" dialog runs after the
+// current key (not in the middle of an edit).
+static mut FULL_PENDING: bool = false;
+static mut FULL_WARNED: bool = false;
+
+// Insert n characters with styles at pos; false if the document is full.
+fn ins_bytes(pos: usize, t: *const u8, s: *const u8, n: usize) -> bool {
     unsafe {
         if LEN + n > MAXT {
-            set_msg("Document is full");
-            return;
+            FULL_PENDING = true;
+            return false;
         }
         move_bytes(TEXT.as_mut_ptr().add(pos + n), TEXT.as_ptr().add(pos), LEN - pos);
         move_bytes(STYLE.as_mut_ptr().add(pos + n), STYLE.as_ptr().add(pos), LEN - pos);
@@ -692,6 +699,7 @@ fn ins_bytes(pos: usize, t: *const u8, s: *const u8, n: usize) {
         // may have been split by an inserted '\n').
         relayout(para_start(pos), para_end(pos + n), n as i32);
         changed();
+        true
     }
 }
 
@@ -725,18 +733,23 @@ fn del_bytes(pos: usize, count: usize) {
 static mut ONE_T: [u8; 1] = [0; 1];
 static mut ONE_S: [u8; 1] = [0; 1];
 
-fn insert_char(c: u8, st: u8) {
+fn insert_char(c: u8, st: u8) -> bool {
     unsafe {
         ONE_T[0] = c;
         ONE_S[0] = st;
-        ins_bytes(CUR, ONE_T.as_ptr(), ONE_S.as_ptr(), 1);
+        if !ins_bytes(CUR, ONE_T.as_ptr(), ONE_S.as_ptr(), 1) {
+            return false;
+        }
         CUR += 1;
+        true
     }
 }
 
 fn insert_str(s: &str, st: u8) {
     for c in s.bytes() {
-        insert_char(c, st);
+        if !insert_char(c, st) {
+            return;
+        }
     }
 }
 
@@ -784,7 +797,9 @@ fn new_paragraph() {
         undo_mark(0);
         let q = para_end(CUR);
         let at_end = CUR == q;
-        insert_char(b'\n', STYLE[q] & 0x37);
+        if !insert_char(b'\n', STYLE[q] & 0x37) {
+            return;
+        }
         if at_end {
             let q2 = CUR;
             STYLE[q2] = 0;
@@ -945,8 +960,9 @@ fn paste() {
         }
         delete_selection();
         undo_mark(0);
-        ins_bytes(CUR, CLIPT.as_ptr(), CLIPS.as_ptr(), CLIPLEN);
-        CUR += CLIPLEN;
+        if ins_bytes(CUR, CLIPT.as_ptr(), CLIPS.as_ptr(), CLIPLEN) {
+            CUR += CLIPLEN;
+        }
     }
 }
 
@@ -1320,7 +1336,7 @@ fn draw_status() {
         sb_str(" words");
         mvaddstr(24, 0, sb());
         // Session goal: words written since opening, with a bar.
-        let done = if WORDS > SESSION_BASE { WORDS - SESSION_BASE } else { 0 };
+        let done = SESSION_CARRY + if WORDS > SESSION_BASE { WORDS - SESSION_BASE } else { 0 };
         sb_clear();
         sb_str("+");
         sb_num(done);
@@ -2083,6 +2099,8 @@ fn reset_doc() {
         TYPING = 0;
         UNDO_COUNT = 0;
         LAST_KIND = 0;
+        FULL_WARNED = false;
+        FULL_PENDING = false;
     }
 }
 
@@ -2098,6 +2116,7 @@ fn after_load(name: &str) {
         UNDO_COUNT = 0;
         full_layout();
         SESSION_BASE = WORDS;
+        FULL_WARNED = false;
     }
 }
 
@@ -2635,6 +2654,119 @@ fn delete_file() {
     }
 }
 
+// ----------------------------------------------------- numbered sequence
+
+// The next free name in a numbered sequence, in INBUF:
+// BOOK.WP -> BOOK2.WP -> BOOK3.WP; DOS names stay within 8 characters.
+fn next_in_sequence() {
+    let name = fname();
+    let b = name.as_bytes();
+    let mut dot = b.len();
+    for i in 0..b.len() {
+        if b[i] == b'.' {
+            dot = i;
+        }
+    }
+    // Split the base into a stem and a trailing number.
+    let mut d = dot;
+    while d > 0 && b[d - 1].is_ascii_digit() {
+        d -= 1;
+    }
+    let mut num: u32 = 1;
+    if d < dot {
+        num = parse_int(str_from_bytes(&b[d..dot])) as u32;
+    }
+    let mut stem = [0u8; 8];
+    let mut sl = d;
+    if sl > 8 {
+        sl = 8;
+    }
+    for i in 0..sl {
+        stem[i] = b[i];
+    }
+    loop {
+        num += 1;
+        let mut digits = [0u8; 6];
+        let mut nd = 0;
+        let mut v = num;
+        while v > 0 {
+            digits[nd] = b'0' + (v % 10) as u8;
+            nd += 1;
+            v = v / 10;
+        }
+        let keep = if sl + nd > 8 { 8 - nd } else { sl };
+        sb_clear();
+        for i in 0..keep {
+            sb_char(stem[i]);
+        }
+        while nd > 0 {
+            nd -= 1;
+            sb_char(digits[nd]);
+        }
+        sb_str(".WP");
+        set_input(sb());
+        if !exists(input_text()) || num > 999 {
+            return;
+        }
+    }
+}
+
+// The document is full: offer to save it and carry on in the next file.
+fn document_full() {
+    unsafe {
+        if !NAMED {
+            alert("Document Full", "This document has reached 200,000 characters.", "Save it first; then it can continue in a new file.");
+            if !save_as() {
+                return;
+            }
+        }
+        next_in_sequence();
+        let mut q = [0u8; 60];
+        let mut ql = 0;
+        for c in "Save it and continue in ".bytes() {
+            q[ql] = c;
+            ql += 1;
+        }
+        for c in input_text().bytes() {
+            if ql < 58 {
+                q[ql] = c;
+                ql += 1;
+            }
+        }
+        q[ql] = b'?';
+        ql += 1;
+        if message_box("Document Full", "This document has reached 200,000 characters.", str_from_bytes(&q[..ql]), "  ~Y~es  |  ~N~o  ") != 0 {
+            set_msg("Document is full");
+            return;
+        }
+        if !save() {
+            return;
+        }
+        // Remember the old name and the session's progress.
+        let mut old = [0u8; 64];
+        let ol = FNLEN;
+        copy_bytes(old.as_mut_ptr(), FNAME.as_ptr(), ol);
+        SESSION_CARRY = SESSION_CARRY + if WORDS > SESSION_BASE { WORDS - SESSION_BASE } else { 0 };
+        let mut next = [0u8; 64];
+        let nl = INLEN;
+        copy_bytes(next.as_mut_ptr(), INBUF.as_ptr(), nl);
+        reset_doc();
+        full_layout();
+        set_fname(str_from_bytes(&next[..nl]));
+        NAMED = true;
+        // A writer's note links the files (notes are not exported).
+        set_kind(K_NOTE);
+        insert_str("Continued from ", 0);
+        insert_str(str_from_bytes(&old[..ol]), 0);
+        new_paragraph();
+        SESSION_BASE = WORDS;
+        UNDO_COUNT = 0;
+        if save() {
+            set_msg("New file started");
+        }
+    }
+}
+
 // ----------------------------------------------------- settings
 
 fn load_options() {
@@ -2765,8 +2897,8 @@ fn replace_all() {
                     rs[k] = st;
                 }
                 del_bytes(i, FINDLEN);
-                if rl > 0 {
-                    ins_bytes(i, rep.as_ptr(), rs.as_ptr(), rl);
+                if rl > 0 && !ins_bytes(i, rep.as_ptr(), rs.as_ptr(), rl) {
+                    break;
                 }
                 i += rl;
                 count += 1;
@@ -2923,7 +3055,7 @@ fn statistics() {
         sb_clear(); sb_str("Pages:             "); sb_num(NLINES as u32 / PAGE_LINES + 1); sb_str(" ("); sb_num(PAGE_LINES); sb_str(" lines each)"); list_add(0);
         sb_clear(); sb_str("Reading time:      about "); sb_num(WORDS / 250 + 1); sb_str(" min"); list_add(0);
         sb_clear(); list_add(0);
-        let done = if WORDS > SESSION_BASE { WORDS - SESSION_BASE } else { 0 };
+        let done = SESSION_CARRY + if WORDS > SESSION_BASE { WORDS - SESSION_BASE } else { 0 };
         sb_clear(); sb_str("This session:      "); sb_num(done); sb_str(" of "); sb_num(GOAL); sb_str(" words"); list_add(0);
         sb_clear(); sb_str("Space used:        "); sb_num(LEN as u32 * 100 / MAXT as u32); sb_str("% of "); sb_num(MAXT as u32); sb_str(" characters"); list_add(0);
         list_dialog("Statistics", false, 0);
@@ -3012,7 +3144,9 @@ fn insert_scene_break() {
         undo_mark(0);
         let q = para_end(CUR);
         CUR = q;
-        insert_char(b'\n', STYLE[q]);
+        if !insert_char(b'\n', STYLE[q]) {
+            return;
+        }
         insert_str("* * *", 0);
         let q2 = para_end(CUR);
         STYLE[q2] = K_SCENE | (AL_CENTER << 4);
@@ -3320,6 +3454,13 @@ fn handle(k: i32) -> bool {
                     type_key(k as u8);
                 }
             }
+        }
+        if FULL_PENDING {
+            FULL_PENDING = false;
+            document_full();
+        } else if !FULL_WARNED && LEN > MAXT / 100 * 95 {
+            FULL_WARNED = true;
+            set_msg("Document 95% full");
         }
         // Auto-save a named document every few hundred edits.
         if AUTOSAVE && NAMED && EDITS >= 300 {

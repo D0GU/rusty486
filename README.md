@@ -132,7 +132,8 @@ writing books, written in R++ on a small ncurses-style library. Type
   breaks, statistics (F9), a session word goal with a progress bar, focus
   mode (F7), typewriter scrolling, first-line indents, auto-save.
 - **Editing:** selection, cut/copy/paste, undo, find, replace all, go to
-  page, word and chapter movement; documents up to 200,000 characters.
+  page, word and chapter movement; documents up to 200,000 characters,
+  after which it offers to continue in the next numbered file (BOOK2.WP...).
 - **Colours:** Borland Blue, Paper, Amber and Midnight themes, saved with
   the other options in `WRITE.CFG`.
 

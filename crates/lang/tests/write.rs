@@ -149,3 +149,52 @@ fn menus_files_and_book_tools() {
     let wp = fs.read("BOOK.WP").unwrap();
     assert_eq!(&wp[..4], b"RWP2");
 }
+
+#[test]
+fn full_document_continues_in_a_numbered_file() {
+    let exe = rusty486_lang::compile(&source()).unwrap();
+    let disk = tinydos_floppy("T", &[("WRITE.EXE", &exe)]).unwrap();
+    let mut m = Machine::new(BIOS.to_vec());
+    m.insert_disk(Drive::A, DiskImage::new(disk));
+    let mut pc = Pc { m };
+    pc.run(1500);
+    pc.typ("WRITE
+");
+    pc.run(1500);
+    pc.ctrl('N', 0x31);
+    pc.typ("All work and no play makes Jack a dull boy. More.
+");
+    pc.ctrl('S', 0x1F);
+    pc.typ("BOOK
+");
+    // Double the text with select all, copy, end, paste until it is full.
+    for _ in 0..16 {
+        pc.ctrl('A', 0x1E);
+        pc.ctrl('C', 0x2E);
+        pc.key(0x4F, 0, CTRL);
+        pc.ctrl('V', 0x2F);
+        pc.run(1500);
+        if pc.screen().contains("Document Full") {
+            break;
+        }
+    }
+    pc.expect("This document has reached 200,000 characters.");
+    pc.expect("Save it and continue in BOOK2.WP?");
+    pc.typ("y");
+    pc.run(3000);
+    pc.expect("BOOK2.WP");
+    pc.expect("Continued from BOOK.WP");
+    pc.typ("Chapter Thirty");
+    pc.key(0x2D, 0, ALT);
+    pc.run(500);
+    pc.expect("Save changes?");
+    pc.typ("y");
+    pc.run(3000);
+    pc.expect("Thanks for using R++ Write!");
+    let mut d = pc.m.disk(Drive::A).unwrap().data.clone();
+    let fs = Fs::open(&mut d).unwrap();
+    assert!(fs.read("BOOK.WP").unwrap().len() > 300_000);
+    let second = fs.read("BOOK2.WP").unwrap();
+    assert!(String::from_utf8_lossy(&second).contains("Continued from BOOK.WP"));
+    assert!(String::from_utf8_lossy(&second).contains("Chapter Thirty"));
+}

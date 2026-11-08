@@ -50,5 +50,8 @@ OPTIONS
   Options > Save options writes WRITE.CFG in the current directory.
 
 LIMITS
-  200,000 characters per document (about 33,000 words): keep long books
-  as one file per part or a few chapters per file. Three undo steps.
+  200,000 characters per document (about 33,000 words). At 95% the status
+  bar warns you; when the document is full, R++ Write offers to save it
+  and continue in the next file of a numbered sequence (BOOK.WP, BOOK2.WP,
+  BOOK3.WP...). The new file starts with a writer's note saying which file
+  it continues, and the session word goal carries over. Three undo steps.
