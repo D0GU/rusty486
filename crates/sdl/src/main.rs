@@ -40,7 +40,7 @@ use screen::{SCREEN_H, SCREEN_W};
 use rusty486_firmware::BIOS;
 
 const USAGE: &str = "usage: rusty486 [--project DIR] [--fda IMG] [--fdb IMG] [--hda IMG] [--hdb IMG] \
-                     [--mhz N] [--mcp-port N] [--no-mcp] [IMG]";
+                     [--mhz N] [--mcp-port N] [--no-mcp] [--mute] [IMG]";
 
 /// Logical display size: 640x400 text shown at 4:3.
 const VIEW_W: u32 = SCREEN_W;
@@ -49,6 +49,7 @@ const VIEW_H: u32 = SCREEN_W * 3 / 4;
 struct Args {
     disks: Vec<(Drive, PathBuf)>,
     mhz: u64,
+    mute: bool,
     mcp_port: Option<u16>,
     project: PathBuf,
 }
@@ -59,6 +60,7 @@ fn parse_args() -> Result<Args, String> {
         mhz: 33,
         mcp_port: Some(mcp::DEFAULT_PORT),
         project: project::default_dir(),
+        mute: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -73,6 +75,7 @@ fn parse_args() -> Result<Args, String> {
                 args.mcp_port = Some(value()?.parse().map_err(|e| format!("--mcp-port: {e}"))?)
             }
             "--no-mcp" => args.mcp_port = None,
+            "--mute" => args.mute = true,
             "--project" => args.project = value()?.into(),
             "-h" | "--help" => return Err(USAGE.into()),
             s if s.starts_with('-') => return Err(format!("unknown option {s}\n{USAGE}")),
@@ -143,6 +146,19 @@ fn run(args: Args) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let mut events = sdl.event_pump()?;
     let clipboard = video.clipboard();
+    // Audio: a 44.1 kHz mono queue fed from the machine each frame.
+    let audio_queue = if args.mute {
+        None
+    } else {
+        sdl.audio().ok().and_then(|a| {
+            let spec = sdl2::audio::AudioSpecDesired { freq: Some(44_100), channels: Some(1), samples: Some(1024) };
+            let q: Option<sdl2::audio::AudioQueue<i16>> = a.open_queue(None, &spec).ok();
+            if let Some(q) = &q {
+                q.resume();
+            }
+            q
+        })
+    };
     video.text_input().start();
 
     let start = Instant::now();
@@ -252,6 +268,13 @@ fn run(args: Args) -> Result<(), String> {
         let dt = now.duration_since(last).min(Duration::from_millis(100));
         last = now;
         emu.run((dt.as_secs_f64() * emu.machine.clock_hz as f64) as u64);
+        let samples = emu.machine.take_audio();
+        if let Some(q) = &audio_queue {
+            // Keep latency bounded: drop audio if more than ~200 ms is queued.
+            if q.size() < 44_100 * 2 / 5 && !emu.paused {
+                let _ = q.queue_audio(&samples);
+            }
+        }
 
         emu.blink_on = (start.elapsed().as_millis() / 266) % 2 == 0;
         emu.render(emu.view);

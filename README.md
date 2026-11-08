@@ -54,6 +54,13 @@ modes up to 640x480 at 8/15/16/32 bpp (banked window at A0000h and a linear
 framebuffer at E0000000h), a 256-colour DAC, retrace status at 3DAh, BIOS
 pixel/palette/font services and text drawing in mode 13h.
 
+**Milestone 8, done:** sound. A YM3812 (OPL2/AdLib) FM synthesizer
+(9 channels, waveforms, envelopes, feedback, tremolo/vibrato, rhythm mode,
+detection timers), a Sound Blaster 2.0 DSP (8-bit PCM by single-cycle or
+auto-init DMA, IRQ 5), an 8237 DMA controller, the PC speaker, and a
+44.1 kHz mixer played through SDL (`--mute` to silence). TinyDOS sets
+`BLASTER=A220 I5 D1 T3`.
+
 ## Roadmap
 
 1. ~~Real-mode boot to text~~
@@ -63,7 +70,7 @@ pixel/palette/font services and text drawing in mode 13h.
 5. ~~TinyDOS~~
 6. ~~Protected mode and paging~~
 7. ~~VBE graphics~~
-8. OPL2 + Sound Blaster + PC speaker
+8. ~~OPL2 + Sound Blaster + PC speaker~~
 9. Sprite, map, sound and disk editors
 10. A Borland-style IDE and compiler for a Rust subset, running inside TinyDOS
 

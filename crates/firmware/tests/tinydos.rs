@@ -268,6 +268,184 @@ vbeinfo times 512 db 0
 }
 
 #[test]
+fn sound_blaster_dma_and_adlib() {
+    let prog = asm(r#"
+        org 0x100
+        ; --- AdLib detection through the OPL2 timers
+        mov ax, 0x0460
+        call opl
+        mov ax, 0x0480
+        call opl
+        mov dx, 0x388
+        in al, dx
+        mov [s1], al
+        mov ax, 0x02FF
+        call opl
+        mov ax, 0x0421
+        call opl
+        mov cx, 0
+        mov dx, 200
+        mov ah, 0x86
+        int 0x15                ; wait ~200 us (rounded up to a tick)
+        mov dx, 0x388
+        in al, dx
+        mov [s2], al
+        mov ax, 0x0460
+        call opl
+        mov ax, 0x0480
+        call opl
+        mov al, [s1]
+        and al, 0xE0
+        jnz fail
+        mov al, [s2]
+        and al, 0xE0
+        cmp al, 0xC0
+        jne fail
+        mov dx, adlib_ok
+        mov ah, 9
+        int 0x21
+        ; --- Sound Blaster: reset, version, DMA playback with IRQ 5
+        mov ax, 0x250D          ; IRQ 5 = INT 0Dh
+        mov dx, irq
+        int 0x21
+        in al, 0x21
+        and al, ~0x20
+        out 0x21, al
+        mov dx, 0x226
+        mov al, 1
+        out dx, al
+        xor al, al
+        out dx, al
+        call dsp_read
+        cmp al, 0xAA
+        jne fail
+        mov al, 0xE1
+        call dsp_write
+        call dsp_read
+        cmp al, 2
+        jne fail
+        call dsp_read
+        mov al, 0xD1            ; speaker on
+        call dsp_write
+        mov al, 0x40            ; 11025 Hz
+        call dsp_write
+        mov al, 165
+        call dsp_write
+        ; DMA channel 1: single transfer, memory -> device
+        mov ax, ds
+        mov dx, ax
+        shl ax, 4
+        shr dx, 12
+        add ax, buf
+        adc dx, 0
+        mov bx, ax
+        mov al, 5
+        out 0x0A, al
+        xor al, al
+        out 0x0C, al
+        mov al, 0x49
+        out 0x0B, al
+        mov al, bl
+        out 0x02, al
+        mov al, bh
+        out 0x02, al
+        mov al, dl
+        out 0x83, al
+        mov al, (1000 - 1) & 0xFF
+        out 0x03, al
+        mov al, (1000 - 1) >> 8
+        out 0x03, al
+        mov al, 1
+        out 0x0A, al
+        mov al, 0x14            ; 8-bit single-cycle output
+        call dsp_write
+        mov al, (1000 - 1) & 0xFF
+        call dsp_write
+        mov al, (1000 - 1) >> 8
+        call dsp_write
+        mov cx, 40              ; wait up to ~2 s for the IRQ
+.wait:  cmp byte [flag], 1
+        je .done
+        hlt
+        loop .wait
+        jmp fail
+.done:  mov dx, sb_ok
+        mov ah, 9
+        int 0x21
+        mov ax, 0x4C00
+        int 0x21
+fail:   mov dx, failed
+        mov ah, 9
+        int 0x21
+        mov ax, 0x4C01
+        int 0x21
+
+opl:    push dx
+        mov dx, 0x388
+        xchg al, ah
+        out dx, al
+        inc dx
+        xchg al, ah
+        out dx, al
+        pop dx
+        ret
+dsp_write:
+        push dx
+        push ax
+        mov dx, 0x22C
+.w:     in al, dx
+        test al, 0x80
+        jnz .w
+        pop ax
+        out dx, al
+        pop dx
+        ret
+dsp_read:
+        push dx
+        mov dx, 0x22E
+.r:     in al, dx
+        test al, 0x80
+        jz .r
+        mov dx, 0x22A
+        in al, dx
+        pop dx
+        ret
+irq:    push ax
+        push dx
+        mov dx, 0x22E
+        in al, dx               ; acknowledge the DSP interrupt
+        mov byte [cs:flag], 1
+        mov al, 0x20
+        out 0x20, al
+        pop dx
+        pop ax
+        iret
+
+s1      db 0
+s2      db 0
+flag    db 0
+adlib_ok db 'AdLib detected ', '$'
+sb_ok   db 'SB IRQ ok', '$'
+failed  db 'SOUND FAILED', '$'
+buf:
+%rep 10
+        times 50 db 0x20
+        times 50 db 0xE0
+%endrep
+    "#);
+    let mut pc = Pc::boot(&[("SOUND.COM", &prog)]);
+    let _ = pc.m.take_audio();
+    pc.type_line("SOUND");
+    pc.run_ms(500);
+    pc.expect("AdLib detected");
+    pc.expect("SB IRQ ok");
+    // The square wave played through the DAC is in the audio stream.
+    let audio = pc.m.take_audio();
+    let loud = audio.iter().filter(|s| s.unsigned_abs() > 8000).count();
+    assert!(loud > 100, "no Sound Blaster output in {} samples", audio.len());
+}
+
+#[test]
 fn autoexec_runs() {
     let pc = Pc::boot(&[("AUTOEXEC.BAT", b"@ECHO OFF\r\nECHO Autoexec says hi\r\n")]);
     pc.expect("Autoexec says hi");

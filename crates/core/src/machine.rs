@@ -4,8 +4,12 @@ use std::collections::BTreeSet;
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, CS};
+use crate::devices::audio::{self, Audio};
 use crate::devices::disk::{self, DiskController, DiskImage};
+use crate::devices::dma::Dma;
 use crate::devices::input::Input;
+use crate::devices::opl::Opl2;
+use crate::devices::sb::{self, SoundBlaster};
 use crate::devices::pic::Pic;
 use crate::devices::pit::Pit;
 use crate::devices::rtc::Rtc;
@@ -29,6 +33,12 @@ pub struct PcBus {
     pub pit: Pit,
     pub input: Input,
     pub rtc: Rtc,
+    pub dma: Dma,
+    pub opl: Opl2,
+    pub sb: SoundBlaster,
+    pub audio: Audio,
+    /// Next CPU cycle at which to bring the audio up to date.
+    audio_due: u64,
     /// Bytes written to the debug port since the frontend last drained it.
     pub debug_out: Vec<u8>,
     /// Last value written to a POST diagnostic port (80h or 190h).
@@ -55,6 +65,11 @@ impl PcBus {
             pit: Pit::default(),
             input: Input::default(),
             rtc: Rtc::default(),
+            dma: Dma::default(),
+            opl: Opl2::new(audio::RATE as f32),
+            sb: SoundBlaster::default(),
+            audio: Audio::default(),
+            audio_due: 0,
             debug_out: Vec::new(),
             post_code: 0,
             a20: true,
@@ -69,6 +84,65 @@ impl PcBus {
         self.now = now;
         if delta > 0 && self.pit.advance_cycles(delta, self.clock_hz) > 0 {
             self.pic.raise(0);
+        }
+        if now >= self.audio_due {
+            self.audio_catch_up();
+        }
+    }
+
+    /// Generate audio (and run Sound Blaster DMA) up to the current cycle.
+    pub fn audio_catch_up(&mut self) {
+        let now = self.now as f64;
+        let clock = self.clock_hz as f64;
+        let per_sample = clock / audio::RATE as f64;
+        if self.audio.next_sample < now - clock {
+            // Far behind (e.g. after a pause): skip ahead.
+            self.audio.next_sample = now;
+            self.audio.sb_next = now;
+        }
+        while self.audio.next_sample <= now {
+            let t = self.audio.next_sample;
+            // Sound Blaster DMA: one byte per PCM sample period.
+            if self.sb.dma_active && !self.sb.paused {
+                let period = clock / self.sb.rate() as f64;
+                if self.audio.sb_next < t - clock / 10.0 {
+                    self.audio.sb_next = t;
+                }
+                while self.audio.sb_next <= t {
+                    match self.dma.read_byte(sb::DMA_CHANNEL, &self.ram) {
+                        Some((b, _)) => {
+                            if self.sb.dma_sample(b) {
+                                self.pic.raise(sb::IRQ);
+                            }
+                        }
+                        None => break, // DMA channel masked: stall
+                    }
+                    self.audio.sb_next += period;
+                    if !self.sb.dma_active {
+                        break;
+                    }
+                }
+            } else {
+                self.audio.sb_next = t;
+            }
+            let opl = self.opl.sample();
+            let dac = self.sb.speaker.then_some(self.sb.dac);
+            let tone = self.pit.speaker_tone();
+            let level = (self.pit.speaker_enable && tone.is_none()).then_some(self.pit.ch[2].out);
+            self.audio.mix(opl, dac, tone, level);
+            self.audio.next_sample += per_sample;
+        }
+        // Catch up again in about a millisecond.
+        self.audio_due = self.now + self.clock_hz / 1000;
+    }
+
+    /// CPU cycles until a device needs attention (for halt skipping).
+    pub fn cycles_to_next_event(&self) -> Option<u64> {
+        let pit = self.pit.cycles_to_irq0(self.clock_hz);
+        let audio = (self.sb.dma_active || self.sb.speaker).then(|| self.audio_due.saturating_sub(self.now).max(1));
+        match (pit, audio) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
@@ -136,6 +210,15 @@ impl Bus for PcBus {
         match port {
             0x92 => (self.a20 as u8) << 1,
             p if Pic::handles(p) => self.pic.read(p),
+            p if Dma::handles(p) => self.dma.read(p),
+            p if Opl2::handles(p) => {
+                if matches!(p, 0x388 | 0x220 | 0x222 | 0x228) {
+                    self.opl.read_status(self.now)
+                } else {
+                    0xFF
+                }
+            }
+            p if SoundBlaster::handles(p) => self.sb.read(p),
             p if Pit::handles(p) => self.pit.read(p),
             p if Rtc::handles(p) => self.rtc.read(p, self.now, self.clock_hz),
             p if Input::handles(p) => self.input.read(p),
@@ -151,7 +234,27 @@ impl Bus for PcBus {
             0x80 | 0x190 => self.post_code = value,
             0x92 => self.a20 = value & 2 != 0,
             p if Pic::handles(p) => self.pic.write(p, value),
-            p if Pit::handles(p) => self.pit.write(p, value),
+            p if Pit::handles(p) => {
+                if matches!(p, 0x42 | 0x43 | 0x61) {
+                    self.audio_catch_up();
+                }
+                self.pit.write(p, value)
+            }
+            p if Dma::handles(p) => self.dma.write(p, value),
+            p if Opl2::handles(p) => {
+                if matches!(p, 0x388 | 0x220 | 0x222 | 0x228) {
+                    self.opl.write_addr(value);
+                } else {
+                    self.audio_catch_up();
+                    self.opl.write_data(value, self.now, self.clock_hz);
+                }
+            }
+            p if SoundBlaster::handles(p) => {
+                self.audio_catch_up();
+                if self.sb.write(p, value) {
+                    self.pic.raise(sb::IRQ);
+                }
+            }
             p if Rtc::handles(p) => self.rtc.write(p, value),
             p if Input::handles(p) => {
                 if self.input.write(p, value) {
@@ -295,9 +398,9 @@ impl Machine {
                     break;
                 }
                 if !self.bus.pic.has_pending() {
-                    // Waiting for an interrupt: jump to the next timer tick.
+                    // Waiting for an interrupt: jump to the next device event.
                     let left = end - self.cpu.cycles;
-                    let skip = self.bus.pit.cycles_to_irq0(self.clock_hz).unwrap_or(left).min(left);
+                    let skip = self.bus.cycles_to_next_event().unwrap_or(left).min(left);
                     self.cpu.cycles += skip.saturating_sub(1);
                 }
             }
@@ -335,6 +438,12 @@ impl Machine {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Take the audio generated so far (44.1 kHz mono).
+    pub fn take_audio(&mut self) -> Vec<i16> {
+        self.bus.audio_catch_up();
+        std::mem::take(&mut self.bus.audio.out)
     }
 
     /// Take everything written to the debug port so far.

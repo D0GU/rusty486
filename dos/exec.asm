@@ -500,7 +500,7 @@ int27:  add dx, 15
         int 0x21
 
 msg_noparent db 'TinyDOS: no process to return to', 13, 10, 0
-default_env  db 'PATH=\', 0, 'COMSPEC=\COMMAND.COM', 0, 0
+default_env  db 'PATH=\', 0, 'COMSPEC=\COMMAND.COM', 0, 'BLASTER=A220 I5 D1 T3', 0, 0
 
 exec_depth   db 0
 exec_stack   times MAX_DEPTH * 10 db 0
