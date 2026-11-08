@@ -171,17 +171,21 @@ for plain text files, in MS-DOS EDIT colours: `TEXT README.TXT`.
 
 ### Ant Colony
 
-**Ant Colony 1.0** (`C:\ANTS`, source `C:\RPP\ANTS.RS`) is a colony simulator
-in 640x480 with 256 colours (VBE mode 101h through the linear framebuffer),
-played with the mouse.
+**Ant Colony 2.0** (`C:\ANTS`, source `C:\RPP\ANTS.RS`) is a side-view ant
+farm in 640x480 with 256 colours, played with the mouse.
 
-- Workers forage and lay scent trails from food to the nest that other
-  workers follow; trails fade, so the colony's roads shift as food runs out.
-- The queen breeds workers and soldiers from stored food; ants eat, age and
-  starve; spiders hunt from the edges and soldiers fight them.
-- Mouse tools: drop food, build rock walls, dig ponds, erase, release a
-  spider; buttons for breeding, auto-breed, pause, speed (1x/2x/4x), new
-  world.
+- A world three screens wide (1920x400): sky, a rolling surface with food
+  and boulders, and earth below. VRAM is set 1920 pixels wide with two
+  pages; the view scrolls by moving the VBE display start (4F06h/4F07h),
+  and moving things are drawn on the hidden page.
+- Mark earth to dig: workers tunnel it out and heap the soil in mounds.
+  Foragers walk the surface and leave scent trails home that others
+  follow. Ants find their way with distance maps (to the queen's chamber,
+  the surface and the digging).
+- The queen breeds workers and soldiers from stored food; ants eat, age
+  and starve; spiders hunt on the surface and soldiers fight them.
+- Tools: dig, drop food, fill tunnels, release a spider; a clickable
+  minimap; scrolling with the arrows, the screen edges or the map.
 
 To rebuild the IDE, R++ Write, Text and Ant Colony after changing
 `crates/rustland`, `crates/lang` or their sources:

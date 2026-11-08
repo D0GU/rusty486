@@ -1,4 +1,5 @@
-//! Ant Colony (dos/rustland/examples/ANTS.RS): 640x480x256 with the mouse.
+//! Ant Colony (dos/rustland/examples/ANTS.RS): a side-view ant farm in
+//! 640x480x256, scrolling over a 1920-pixel-wide world, with the mouse.
 
 use rusty486_core::devices::disk::DiskImage;
 use rusty486_core::machine::{Drive, Machine};
@@ -41,10 +42,18 @@ impl Pc {
             std::fs::write(format!("{dir}/{name}.ppm"), out).unwrap();
         }
     }
-    /// A pixel of the page being shown.
+    /// A pixel of the screen as shown (page and scroll position).
     fn pixel(&self, x: usize, y: usize) -> u8 {
         let v = &self.m.bus.video;
-        v.vram[(v.y_offset as usize + y) * 640 + x]
+        let base = v.y_offset as usize * 1920 + v.x_offset as usize;
+        v.vram[base + y * 1920 + x]
+    }
+    fn count(&self, colours: std::ops::Range<u8>) -> usize {
+        (0..400).flat_map(|y| (0..640).map(move |x| (x, y))).filter(|&(x, y)| colours.contains(&self.pixel(x, y))).count()
+    }
+    fn mouse(&mut self, x: u16, y: u16) {
+        self.m.mouse_move(x, (y as u32 * 400 / 480) as u16);
+        self.run(50);
     }
 }
 
@@ -56,7 +65,7 @@ fn committed_build_is_current() {
 }
 
 #[test]
-fn colony_runs_with_the_mouse() {
+fn ant_farm_digs_forages_and_scrolls() {
     let exe = rusty486_lang::compile(&source()).unwrap();
     let disk = tinydos_floppy("T", &[("ANTS.EXE", &exe)]).unwrap();
     let mut m = Machine::new(BIOS.to_vec());
@@ -64,47 +73,43 @@ fn colony_runs_with_the_mouse() {
     let mut pc = Pc { m };
     pc.run(1500);
     pc.typ("ANTS\n");
-    pc.run(3000);
+    pc.run(6000);
     let v = &pc.m.bus.video;
-    assert_eq!((v.xres, v.yres, v.bpp), (640, 480, 8));
+    assert_eq!((v.xres, v.yres, v.bpp, v.virt_width), (640, 480, 8, 1920));
+    // The view starts over the nest, in the middle of the world.
+    assert_eq!(v.x_offset, 960 - 320);
     pc.shot("start");
-    // The world has grass and the panel is drawn.
-    assert!((16..48).contains(&pc.pixel(10, 300)) || pc.pixel(10, 300) >= 48, "no world");
-    assert_eq!(pc.pixel(300, 428), 91, "panel border");
+    // Sky at the top, earth below, the panel border.
+    assert!((16..24).contains(&pc.pixel(5, 5)) || (24..26).contains(&pc.pixel(5, 5)), "sky: {}", pc.pixel(5, 5));
+    assert!((32..48).contains(&pc.pixel(5, 300)) || (56..60).contains(&pc.pixel(5, 300)), "earth: {}", pc.pixel(5, 300));
+    assert_eq!(pc.pixel(300, 400), 91, "panel border");
+    let tunnel0 = pc.count(52..56);
 
-    // Ants walk out of the nest.
-    let start = pc.m.cpu.cycles;
-    pc.run(10_000);
-    let _ = start;
+    // Ants come out, and the first gallery gets dug.
+    pc.run(20_000);
     pc.shot("later");
-    let ants = (0..428).flat_map(|y| (0..640).map(move |x| (x, y))).filter(|&(x, y)| {
-        let p = pc.pixel(x, y);
-        (p == 80 || p == 81) && ((x as i32 - 320).pow(2) + (y as i32 - 220).pow(2) > 60 * 60)
-    });
-    assert!(ants.count() > 5, "no ants away from the nest");
+    assert!(pc.count(80..82) > 20, "no ants on screen");
+    assert!(pc.count(52..56) > tunnel0 + 50, "nothing was dug: {} -> {}", tunnel0, pc.count(52..56));
 
-    // Click the Rock tool, then drag on the world: rock appears there.
-    pc.m.mouse_move(BUTTON_ROCK_X, (436u32 * 400 / 480) as u16);
-    pc.run(100);
+    // Dig tool (selected at the start): drag over earth to mark it.
+    let marked0 = pc.count(48..52);
+    pc.mouse(100, 300);
     pc.m.mouse_buttons(1);
+    pc.run(100);
+    pc.mouse(140, 300);
     pc.run(100);
     pc.m.mouse_buttons(0);
-    pc.run(100);
-    pc.m.mouse_move(100, (50u32 * 400 / 480) as u16);
-    pc.run(100);
-    pc.m.mouse_buttons(1);
+    pc.mouse(320, 200);
     pc.run(300);
-    pc.m.mouse_buttons(0);
-    pc.run(200);
-    pc.shot("rock");
-    let p = pc.pixel(96, 48);
-    assert!((48..52).contains(&p), "no rock under the mouse: {p}");
+    pc.shot("marked");
+    assert!(pc.count(48..52) > marked0 + 100, "no earth marked for digging");
 
-    // Esc quits back to DOS with a summary.
+    // Scroll right with the arrow key.
+    pc.key(0x4D, 0);
+    pc.run(200);
+    assert_eq!(pc.m.bus.video.x_offset, 960 - 320 + 64);
+
     pc.key(0x01, 27);
     pc.run(500);
-    assert!(pc.m.screen_text().contains("ants were born"), "{}", pc.m.screen_text());
+    assert!(pc.m.screen_text().contains("cells were dug"), "{}", pc.m.screen_text());
 }
-
-/// The "2 Rock" button is the second in the first row.
-const BUTTON_ROCK_X: u16 = 6 + (6 * 8 + 10) + 4 + 10;
