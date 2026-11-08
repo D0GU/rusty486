@@ -31,8 +31,8 @@ impl Cpu {
                 0x3E => self.seg_ovr = Some(DS),
                 0x64 => self.seg_ovr = Some(FS),
                 0x65 => self.seg_ovr = Some(GS),
-                0x66 => self.op32 = true,
-                0x67 => self.a32 = true,
+                0x66 => self.op32 = !self.code32(),
+                0x67 => self.a32 = !self.code32(),
                 0xF0 => self.lock = true,
                 0xF2 => self.rep = Rep::Repne,
                 0xF3 => self.rep = Rep::Repe,
@@ -178,7 +178,7 @@ impl Cpu {
                         self.set_reg(osz, r, v);
                     }
                 }
-                if osz == 32 {
+                if osz == 32 && self.quirks_386 && !self.stack32() {
                     self.regs[ESP] = (saved_sp & 0xFFFF_0000) | (self.regs[ESP] & 0xFFFF);
                 }
             }
@@ -196,7 +196,21 @@ impl Cpu {
                     return Err(BR);
                 }
             }
-            0x63 => return Err(UD), // ARPL is invalid in real mode
+            0x63 => {
+                // ARPL (protected mode only)
+                if !self.pe() || self.vm() {
+                    return Err(UD);
+                }
+                let m = self.modrm(bus)?;
+                let dst = self.read_rm(bus, &m, 16)?;
+                let src = self.reg(16, m.reg);
+                if dst & 3 < src & 3 {
+                    self.write_rm(bus, &m, 16, (dst & !3) | (src & 3))?;
+                    self.set_flag(ZF, true);
+                } else {
+                    self.set_flag(ZF, false);
+                }
+            }
             0x68 => {
                 let v = self.fetch_imm(bus, osz)?;
                 self.push(bus, osz, v)?;
@@ -216,10 +230,13 @@ impl Cpu {
                 let r = self.imul_f(osz, a, b);
                 self.set_reg(osz, m.reg, r);
             }
-            0x6C => self.string(bus, Str::Ins, 8)?,
-            0x6D => self.string(bus, Str::Ins, osz)?,
-            0x6E => self.string(bus, Str::Outs, 8)?,
-            0x6F => self.string(bus, Str::Outs, osz)?,
+            0x6C..=0x6F => {
+                let sz = if op & 1 == 0 { 8 } else { osz };
+                let port = self.regs[EDX] as u16;
+                self.check_io(bus, port, sz / 8)?;
+                let kind = if op < 0x6E { Str::Ins } else { Str::Outs };
+                self.string(bus, kind, sz)?;
+            }
             0x70..=0x7F => {
                 let d = self.fetch_simm8(bus)?;
                 if self.cond(op & 0xF) {
@@ -295,7 +312,7 @@ impl Cpu {
                     return Err(UD);
                 }
                 let v = self.read_rm(bus, &m, 16)?;
-                self.load_seg_real(m.reg, v as u16);
+                self.load_seg(bus, m.reg, v as u16)?;
             }
             0x8F => {
                 // POP r/m. ESP is incremented before the address is computed
@@ -335,10 +352,7 @@ impl Cpu {
                 let ip = self.fetch_imm(bus, osz)?;
                 let cs = self.fetch16(bus)?;
                 self.cycles += 17;
-                let (old_cs, old_ip) = (self.sregs[CS], self.eip);
-                self.push(bus, osz, old_cs as u32)?;
-                self.push(bus, osz, old_ip)?;
-                self.jump_far(cs, ip)?;
+                self.far_transfer(bus, cs, ip, true)?;
             }
             0x9B => {
                 // WAIT / FWAIT
@@ -347,10 +361,16 @@ impl Cpu {
                 }
             }
             0x9C => {
+                if self.vm() && self.iopl() < 3 {
+                    return Err(GP);
+                }
                 let v = self.flags_image(osz);
                 self.push(bus, osz, v)?;
             }
             0x9D => {
+                if self.vm() && self.iopl() < 3 {
+                    return Err(GP);
+                }
                 let v = self.pop(bus, osz)?;
                 self.set_flags_image(osz, v);
             }
@@ -423,10 +443,8 @@ impl Cpu {
                 let n = if op == 0xC2 { self.fetch16(bus)? } else { 0 };
                 let ip = self.stack_peek(bus, 0, osz)?;
                 self.jump(ip)?;
-                let sp = (self.regs[ESP] as u16)
-                    .wrapping_add((osz / 8) as u16)
-                    .wrapping_add(n);
-                self.set_reg(16, ESP, sp as u32);
+                let sp = self.sp().wrapping_add(osz / 8).wrapping_add(n as u32);
+                self.set_sp(sp);
                 self.cycles += 4;
             }
             0xC4 | 0xC5 => {
@@ -445,21 +463,15 @@ impl Cpu {
             0xC8 => self.enter(bus)?,
             0xC9 => {
                 // LEAVE
-                let bp = self.regs[EBP] & 0xFFFF;
+                let bp = self.regs[EBP] & self.smask();
                 let v = self.rd(bus, SS, bp, osz)?;
-                self.set_reg(16, ESP, bp.wrapping_add(osz / 8));
+                self.set_sp(bp.wrapping_add(osz / 8));
                 self.set_reg(osz, EBP, v);
             }
             0xCA | 0xCB => {
                 // RETF [imm16]
                 let n = if op == 0xCA { self.fetch16(bus)? } else { 0 };
-                let ip = self.stack_peek(bus, 0, osz)?;
-                let cs = self.stack_peek(bus, osz / 8, osz)? as u16;
-                self.jump_far(cs, ip)?;
-                let sp = (self.regs[ESP] as u16)
-                    .wrapping_add((osz / 4) as u16)
-                    .wrapping_add(n);
-                self.set_reg(16, ESP, sp as u32);
+                self.far_return(bus, n as u32)?;
                 self.cycles += 12;
             }
             0xCC => self.soft_int(bus, 3)?,
@@ -474,13 +486,7 @@ impl Cpu {
             }
             0xCF => {
                 // IRET
-                let ip = self.stack_peek(bus, 0, osz)?;
-                let cs = self.stack_peek(bus, osz / 8, osz)? as u16;
-                let fl = self.stack_peek(bus, osz / 4, osz)?;
-                self.jump_far(cs, ip)?;
-                let sp = (self.regs[ESP] as u16).wrapping_add((3 * osz / 8) as u16);
-                self.set_reg(16, ESP, sp as u32);
-                self.set_flags_image(osz, fl);
+                self.iret(bus)?;
                 self.cycles += 14;
             }
 
@@ -551,6 +557,7 @@ impl Cpu {
                     self.regs[EDX] as u16
                 };
                 self.cycles += 10;
+                self.check_io(bus, port, sz / 8)?;
                 if op & 2 == 0 {
                     let v = self.io_in(bus, port, sz);
                     self.set_reg(sz, EAX, v);
@@ -577,7 +584,7 @@ impl Cpu {
             0xEA => {
                 let ip = self.fetch_imm(bus, osz)?;
                 let cs = self.fetch16(bus)?;
-                self.jump_far(cs, ip)?;
+                self.far_transfer(bus, cs, ip, false)?;
                 self.cycles += 12;
             }
             0xEB => {
@@ -585,14 +592,25 @@ impl Cpu {
                 self.jump(self.eip.wrapping_add(d))?;
             }
 
-            0xF1 => self.soft_int(bus, 1)?, // ICEBP
-            0xF4 => self.halted = true,
+            0xF1 => {
+                // ICEBP: like an exception (no gate privilege check).
+                let ret = self.eip;
+                self.interrupt(bus, 1, ret, IntKind::Exception(0))?;
+            }
+            0xF4 => {
+                self.require_cpl0()?;
+                self.halted = true;
+            }
             0xF5 => self.eflags ^= CF,
             0xF6 | 0xF7 => self.group3(bus, op)?,
             0xF8 => self.set_flag(CF, false),
             0xF9 => self.set_flag(CF, true),
-            0xFA => self.set_flag(IF, false),
+            0xFA => {
+                self.require_iopl()?;
+                self.set_flag(IF, false);
+            }
             0xFB => {
+                self.require_iopl()?;
                 if !self.flag(IF) {
                     self.irq_inhibit = true;
                 }
@@ -634,7 +652,7 @@ impl Cpu {
 
     fn soft_int<B: Bus>(&mut self, bus: &mut B, vector: u8) -> R<()> {
         let ret = self.eip;
-        self.interrupt(bus, vector, ret)
+        self.interrupt(bus, vector, ret, IntKind::Software)
     }
 
     pub(crate) fn io_in<B: Bus>(&mut self, bus: &mut B, port: u16, sz: u32) -> u32 {
@@ -663,7 +681,7 @@ impl Cpu {
         let off = self.rd(bus, m.seg, m.off, osz)?;
         let sel_off = self.off_plus(&m, osz / 8);
         let sel = self.rd(bus, m.seg, sel_off, 16)? as u16;
-        self.load_seg_real(seg, sel);
+        self.load_seg(bus, seg, sel)?;
         self.set_reg(osz, m.reg, off);
         Ok(())
     }
@@ -674,19 +692,30 @@ impl Cpu {
         let level = (self.fetch8(bus)? & 31) as u32;
         self.cycles += 10 + 4 * level as u64;
         self.push(bus, osz, self.reg(osz, EBP))?;
-        let frame = self.regs[ESP] & 0xFFFF;
+        // FrameTemp: all of ESP for a 32-bit ENTER, SP otherwise.
+        let frame = if osz == 32 { self.regs[ESP] } else { self.sp() };
         if level > 0 {
-            let mut bp = self.regs[EBP] & 0xFFFF;
+            let mut bp = self.regs[EBP] & self.smask();
             for _ in 1..level {
-                bp = bp.wrapping_sub(osz / 8) & 0xFFFF;
+                bp = bp.wrapping_sub(osz / 8) & self.smask();
                 let v = self.rd(bus, SS, bp, osz)?;
                 self.push(bus, osz, v)?;
             }
             self.push(bus, osz, frame)?;
         }
-        let new_sp = (self.regs[ESP] & 0xFFFF).wrapping_sub(size) & 0xFFFF;
-        self.set_reg(osz, EBP, frame);
-        self.set_reg(16, ESP, new_sp);
+        let new_sp = self.sp().wrapping_sub(size) & self.smask();
+        // ENTER faults if a write at the final stack pointer would.
+        if size > 0 {
+            self.probe_write(bus, SS, new_sp, osz / 8)?;
+        }
+        // The frame pointer's size follows the stack, not the operand size
+        // (the 386EX writes all of EBP for a 32-bit ENTER regardless).
+        if self.stack32() || (self.quirks_386 && osz == 32) {
+            self.regs[EBP] = frame;
+        } else {
+            self.set_reg(16, EBP, frame);
+        }
+        self.set_sp(new_sp);
         Ok(())
     }
 
@@ -740,12 +769,7 @@ impl Cpu {
                 let ip = self.rd(bus, m.seg, m.off, osz)?;
                 let cs_off = self.off_plus(&m, osz / 8);
                 let cs = self.rd(bus, m.seg, cs_off, 16)? as u16;
-                if m.reg == 3 {
-                    let (old_cs, old_ip) = (self.sregs[CS], self.eip);
-                    self.push(bus, osz, old_cs as u32)?;
-                    self.push(bus, osz, old_ip)?;
-                }
-                self.jump_far(cs, ip)?;
+                self.far_transfer(bus, cs, ip, m.reg == 3)?;
                 self.cycles += 12;
             }
             4 => {

@@ -39,7 +39,15 @@ assembly (`dos/`): FAT12/FAT16 with subdirectories, an INT 21h subset (console,
 files, directories, find first/next, memory, EXEC of .COM and MZ .EXE,
 TSRs), an INT 33h mouse driver and COMMAND.COM (DIR, TYPE, COPY, DEL, REN,
 MD, RD, CD, MEM, DATE, TIME, ECHO, PAUSE, batch files, AUTOEXEC.BAT).
-Drive C: is a persistent 32 MB TinyDOS disk in `%USERPROFILE%usty486\hdd.img`.
+Drive C: is a persistent 32 MB TinyDOS disk in `%USERPROFILE%
+usty486\hdd.img`.
+
+**Milestone 6, done:** protected mode (descriptors, privilege levels, call
+gates, interrupt/trap gates with TSS stack switches, LDT/TR, I/O permission
+bitmap), virtual-8086 mode and paging (TLB, accessed/dirty bits, page
+faults). Passes the complete [test386.asm](https://github.com/barotto/test386.asm)
+ROM (fetch it with `scripts/fetch-test386.ps1`), including its arithmetic
+reference output. Not emulated: hardware task switching.
 
 ## Roadmap
 
@@ -48,7 +56,7 @@ Drive C: is a persistent 32 MB TinyDOS disk in `%USERPROFILE%usty486\hdd.img`.
 3. ~~Code editor with a built-in NASM-syntax assembler~~
 4. ~~Interrupts, timer, RTC, keyboard and mouse~~
 5. ~~TinyDOS~~
-6. Protected mode and paging
+6. ~~Protected mode and paging~~
 7. VBE graphics
 8. OPL2 + Sound Blaster + PC speaker
 9. Sprite, map, sound and disk editors

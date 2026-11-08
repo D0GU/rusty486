@@ -1,6 +1,6 @@
 //! Arithmetic, logic and flag computation.
 
-use super::{Cpu, Fault, R, DE, EAX, EDX};
+use super::{Cpu, R, DE, EAX, EDX};
 
 pub mod flags {
     pub const CF: u32 = 1 << 0;
@@ -359,7 +359,7 @@ fn div_checked(signed: bool, n: u64, d: u64, nbits: u32, sz: u32) -> R<(u32, u32
     } else {
         let q = n / d;
         if q > mask(sz) as u64 {
-            return Err(Fault(0));
+            return Err(DE);
         }
         Ok((q as u32, (n % d) as u32))
     }

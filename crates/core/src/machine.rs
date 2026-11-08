@@ -31,6 +31,8 @@ pub struct PcBus {
     pub rtc: Rtc,
     /// Bytes written to the debug port since the frontend last drained it.
     pub debug_out: Vec<u8>,
+    /// Last value written to a POST diagnostic port (80h or 190h).
+    pub post_code: u8,
     /// Fast A20 gate (port 92h bit 1). When off, address line 20 is forced low.
     pub a20: bool,
     /// CPU cycle count and clock as of the last tick (for time-based devices).
@@ -54,6 +56,7 @@ impl PcBus {
             input: Input::default(),
             rtc: Rtc::default(),
             debug_out: Vec::new(),
+            post_code: 0,
             a20: true,
             now: 0,
             clock_hz: 33_000_000,
@@ -116,6 +119,7 @@ impl Bus for PcBus {
     fn io_write8(&mut self, port: u16, value: u8) {
         match port {
             DEBUG_PORT => self.debug_out.push(value),
+            0x80 | 0x190 => self.post_code = value,
             0x92 => self.a20 = value & 2 != 0,
             p if Pic::handles(p) => self.pic.write(p, value),
             p if Pit::handles(p) => self.pit.write(p, value),

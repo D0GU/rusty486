@@ -234,6 +234,7 @@ fn run_test(t: &Test, bus: &mut TestBus, flag_mask: u16) -> Vec<String> {
     // Behave like the 386EX the tests were captured on.
     cpu.popf_mask32 = 0x7FD5;
     cpu.has_cpuid = false;
+    cpu.quirks_386 = true;
     cpu.cr0 = init[0];
     cpu.cr3 = init[1];
     for (slot, i) in [(0usize, 2usize), (3, 3), (1, 4), (2, 5), (6, 6), (7, 7), (5, 8), (4, 9)] {

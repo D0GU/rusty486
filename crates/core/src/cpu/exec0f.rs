@@ -10,13 +10,35 @@ impl Cpu {
         let osz = self.osz();
         let op = self.fetch8(bus)?;
         match op {
-            0x00 => return Err(UD), // SLDT/STR/LLDT/LTR/VERR/VERW: protected mode only
+            0x00 => self.group6(bus)?,
             0x01 => self.group7(bus)?,
-            0x06 => self.cr0 &= !CR0_TS, // CLTS
-            0x08 | 0x09 => self.cycles += 4, // INVD / WBINVD: no cache to flush
+            0x02 | 0x03 => {
+                // LAR / LSL (protected mode only)
+                if !self.pe() || self.vm() {
+                    return Err(UD);
+                }
+                let m = self.modrm(bus)?;
+                let sel = self.read_rm(bus, &m, 16)? as u16;
+                match self.lar_lsl(bus, sel, op == 0x03) {
+                    Some(v) => {
+                        self.set_reg(osz, m.reg, v);
+                        self.set_flag(ZF, true);
+                    }
+                    None => self.set_flag(ZF, false),
+                }
+            }
+            0x06 => {
+                self.require_cpl0()?;
+                self.cr0 &= !CR0_TS; // CLTS
+            }
+            0x08 | 0x09 => {
+                self.require_cpl0()?;
+                self.cycles += 4; // INVD / WBINVD: no cache to flush
+            }
             0x20 | 0x22 => {
                 // MOV r32, CRn / MOV CRn, r32 (always register form)
                 let m = self.modrm(bus)?;
+                self.require_cpl0()?;
                 if op == 0x20 {
                     let v = match m.reg {
                         0 => self.cr0,
@@ -28,16 +50,47 @@ impl Cpu {
                 } else {
                     let v = self.regs[m.rm];
                     match m.reg {
-                        0 => self.cr0 = v | 0x10, // ET is hardwired on the 486
+                        0 => self.write_cr0(v)?,
                         2 => self.cr2 = v,
-                        3 => self.cr3 = v,
+                        3 => {
+                            self.cr3 = v;
+                            self.tlb_flush();
+                        }
                         _ => return Err(UD),
                     }
+                }
+            }
+            0x31 => {
+                // RDTSC (Pentium; handy for Rust code built for i586)
+                self.regs[EAX] = self.cycles as u32;
+                self.regs[EDX] = (self.cycles >> 32) as u32;
+            }
+            0xC7 => {
+                // CMPXCHG8B m64 (Pentium)
+                let m = self.modrm(bus)?;
+                if m.is_reg() || m.reg != 1 {
+                    return Err(UD);
+                }
+                let lo = self.rd(bus, m.seg, m.off, 32)?;
+                let hi_off = self.off_plus(&m, 4);
+                let hi = self.rd(bus, m.seg, hi_off, 32)?;
+                if lo == self.regs[EAX] && hi == self.regs[EDX] {
+                    let (b, c) = (self.regs[EBX], self.regs[ECX]);
+                    self.wr(bus, m.seg, m.off, 32, b)?;
+                    self.wr(bus, m.seg, hi_off, 32, c)?;
+                    self.set_flag(ZF, true);
+                } else {
+                    self.wr(bus, m.seg, m.off, 32, lo)?;
+                    self.wr(bus, m.seg, hi_off, 32, hi)?;
+                    self.regs[EAX] = lo;
+                    self.regs[EDX] = hi;
+                    self.set_flag(ZF, false);
                 }
             }
             0x21 | 0x23 => {
                 // MOV r32, DRn / MOV DRn, r32
                 let m = self.modrm(bus)?;
+                self.require_cpl0()?;
                 let r = match m.reg {
                     4 => 6,
                     5 => 7,
@@ -167,9 +220,43 @@ impl Cpu {
         Ok(())
     }
 
+    /// 0F 00: SLDT, STR, LLDT, LTR, VERR, VERW (protected mode only).
+    fn group6<B: Bus>(&mut self, bus: &mut B) -> R<()> {
+        if !self.pe() || self.vm() {
+            return Err(UD);
+        }
+        let m = self.modrm(bus)?;
+        match m.reg {
+            0 | 1 => {
+                let v = if m.reg == 0 { self.ldtr.sel } else { self.tr.sel } as u32;
+                let sz = if m.is_reg() { self.osz() } else { 16 };
+                self.write_rm(bus, &m, sz, v)?;
+            }
+            2 | 3 => {
+                self.require_cpl0()?;
+                let sel = self.read_rm(bus, &m, 16)? as u16;
+                if m.reg == 2 {
+                    self.lldt(bus, sel)?;
+                } else {
+                    self.ltr(bus, sel)?;
+                }
+            }
+            4 | 5 => {
+                let sel = self.read_rm(bus, &m, 16)? as u16;
+                let ok = self.verify(bus, sel, m.reg == 5);
+                self.set_flag(ZF, ok);
+            }
+            _ => return Err(UD),
+        }
+        Ok(())
+    }
+
     /// 0F 01: SGDT, SIDT, LGDT, LIDT, SMSW, LMSW, INVLPG.
     fn group7<B: Bus>(&mut self, bus: &mut B) -> R<()> {
         let m = self.modrm(bus)?;
+        if matches!(m.reg, 2 | 3 | 6 | 7) {
+            self.require_cpl0()?;
+        }
         match m.reg {
             0..=3 => {
                 if m.is_reg() {
@@ -211,13 +298,16 @@ impl Cpu {
             6 => {
                 // LMSW: loads PE/MP/EM/TS; PE can be set but not cleared.
                 let v = self.read_rm(bus, &m, 16)?;
-                self.cr0 = (self.cr0 & !0xE) | (v & 0xF) | (self.cr0 & CR0_PE);
+                let new = (self.cr0 & !0xE) | (v & 0xF) | (self.cr0 & CR0_PE);
+                self.write_cr0(new)?;
             }
             7 => {
-                // INVLPG (486): no TLB yet
+                // INVLPG (486)
                 if m.is_reg() {
                     return Err(UD);
                 }
+                let lin = self.seg_base[m.seg].wrapping_add(m.off);
+                self.tlb_flush_page(lin);
             }
             _ => return Err(UD),
         }
